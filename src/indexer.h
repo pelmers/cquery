@@ -64,7 +64,8 @@ bool operator!=(const Id<T>& a, const Id<T>& b) {
 
 template <typename T>
 void Reflect(Reader& visitor, Id<T>& id) {
-  id.id = visitor.GetUint64();
+  if (visitor.IsUint64())
+    id.id = visitor.GetUint64();
 }
 template <typename T>
 void Reflect(Writer& visitor, Id<T>& value) {
@@ -131,7 +132,9 @@ inline void Reflect(Writer& visitor, IndexFuncRef& value) {
 
   if (value.is_implicit)
     s += "~";
-  if (value.id.id == -1) {  // id.id is unsigned, special case 0 value
+
+  // id.id is unsigned, special case 0 value
+  if (static_cast<ssize_t>(value.id.id) == -1) {
     s += "-1";
   } else {
     s += std::to_string(value.id.id);

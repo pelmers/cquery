@@ -66,6 +66,10 @@ struct Config {
 
   // Version of the client.
   int clientVersion = 0;
+
+  // If true parameter declarations are included in code completion when calling
+  // a function or method
+  bool enableSnippetInsertion = true;
 };
 MAKE_REFLECT_STRUCT(Config,
                     compileCommandsDirectory,
@@ -96,4 +100,5 @@ MAKE_REFLECT_STRUCT(Config,
 
                     codeLensOnLocalVariables,
 
-                    clientVersion);
+                    clientVersion,
+                    enableSnippetInsertion);

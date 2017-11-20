@@ -1459,7 +1459,7 @@ bool QueryDbMainLoop(Config* config,
 
           // Make sure cache directory is valid.
           if (config->cacheDirectory.empty()) {
-            LOG_S(ERROR) << "No cache directory";
+            LOG_S(FATAL) << "Exiting; no cache directory";
             exit(1);
           }
           // Make sure compile commands directory is valid.
@@ -1483,6 +1483,66 @@ bool QueryDbMainLoop(Config* config,
           }
           config->resourceDirectory = NormalizePath(config->resourceDirectory);
           LOG_S(INFO) << "Using -resource-dir=" << config->resourceDirectory;
+
+          // Send initialization before starting indexers, so we don't send a
+          // status update too early.
+          // TODO: query request->params.capabilities.textDocument and support
+          // only things the client supports.
+
+          auto response = Out_InitializeResponse();
+          response.id = request->id;
+
+          // response.result.capabilities.textDocumentSync =
+          // lsTextDocumentSyncOptions();
+          // response.result.capabilities.textDocumentSync->openClose = true;
+          // response.result.capabilities.textDocumentSync->change =
+          // lsTextDocumentSyncKind::Full;
+          // response.result.capabilities.textDocumentSync->willSave = true;
+          // response.result.capabilities.textDocumentSync->willSaveWaitUntil =
+          // true;
+          response.result.capabilities.textDocumentSync =
+              lsTextDocumentSyncKind::Incremental;
+
+          response.result.capabilities.renameProvider = true;
+
+          response.result.capabilities.completionProvider =
+              lsCompletionOptions();
+          response.result.capabilities.completionProvider->resolveProvider =
+              false;
+          // vscode doesn't support trigger character sequences, so we use ':'
+          // for
+          // '::' and '>' for '->'. See
+          // https://github.com/Microsoft/language-server-protocol/issues/138.
+          response.result.capabilities.completionProvider->triggerCharacters = {
+              ".", ":", ">", "#"};
+
+          response.result.capabilities.signatureHelpProvider =
+              lsSignatureHelpOptions();
+          // NOTE: If updating signature help tokens make sure to also update
+          // WorkingFile::FindClosestCallNameInBuffer.
+          response.result.capabilities.signatureHelpProvider
+              ->triggerCharacters = {"(", ","};
+
+          response.result.capabilities.codeLensProvider = lsCodeLensOptions();
+          response.result.capabilities.codeLensProvider->resolveProvider =
+              false;
+
+          response.result.capabilities.definitionProvider = true;
+          response.result.capabilities.documentHighlightProvider = true;
+          response.result.capabilities.hoverProvider = true;
+          response.result.capabilities.referencesProvider = true;
+
+          response.result.capabilities.codeActionProvider = true;
+
+          response.result.capabilities.documentSymbolProvider = true;
+          response.result.capabilities.workspaceSymbolProvider = true;
+
+          response.result.capabilities.documentLinkProvider =
+              lsDocumentLinkOptions();
+          response.result.capabilities.documentLinkProvider->resolveProvider =
+              false;
+
+          ipc->SendOutMessageToClient(IpcId::Initialize, response);
 
           // Set project root.
           config->projectRoot =
@@ -1537,64 +1597,11 @@ bool QueryDbMainLoop(Config* config,
           time.ResetAndPrint("[perf] Dispatched initial index requests");
         }
 
-        // TODO: query request->params.capabilities.textDocument and support
-        // only things the client supports.
-
-        auto response = Out_InitializeResponse();
-        response.id = request->id;
-
-        // response.result.capabilities.textDocumentSync =
-        // lsTextDocumentSyncOptions();
-        // response.result.capabilities.textDocumentSync->openClose = true;
-        // response.result.capabilities.textDocumentSync->change =
-        // lsTextDocumentSyncKind::Full;
-        // response.result.capabilities.textDocumentSync->willSave = true;
-        // response.result.capabilities.textDocumentSync->willSaveWaitUntil =
-        // true;
-        response.result.capabilities.textDocumentSync =
-            lsTextDocumentSyncKind::Incremental;
-
-        response.result.capabilities.renameProvider = true;
-
-        response.result.capabilities.completionProvider = lsCompletionOptions();
-        response.result.capabilities.completionProvider->resolveProvider =
-            false;
-        // vscode doesn't support trigger character sequences, so we use ':' for
-        // '::' and '>' for '->'. See
-        // https://github.com/Microsoft/language-server-protocol/issues/138.
-        response.result.capabilities.completionProvider->triggerCharacters = {
-            ".", ":", ">", "#"};
-
-        response.result.capabilities.signatureHelpProvider =
-            lsSignatureHelpOptions();
-        // NOTE: If updating signature help tokens make sure to also update
-        // WorkingFile::FindClosestCallNameInBuffer.
-        response.result.capabilities.signatureHelpProvider
-            ->triggerCharacters = {"(", ","};
-
-        response.result.capabilities.codeLensProvider = lsCodeLensOptions();
-        response.result.capabilities.codeLensProvider->resolveProvider = false;
-
-        response.result.capabilities.definitionProvider = true;
-        response.result.capabilities.documentHighlightProvider = true;
-        response.result.capabilities.hoverProvider = true;
-        response.result.capabilities.referencesProvider = true;
-
-        response.result.capabilities.codeActionProvider = true;
-
-        response.result.capabilities.documentSymbolProvider = true;
-        response.result.capabilities.workspaceSymbolProvider = true;
-
-        response.result.capabilities.documentLinkProvider =
-            lsDocumentLinkOptions();
-        response.result.capabilities.documentLinkProvider->resolveProvider =
-            false;
-
-        ipc->SendOutMessageToClient(IpcId::Initialize, response);
         break;
       }
 
       case IpcId::Exit: {
+        LOG_S(INFO) << "Exiting; got IpcId::Exit";
         exit(0);
         break;
       }
@@ -2009,9 +2016,8 @@ bool QueryDbMainLoop(Config* config,
           }
 
           ClangCompleteManager::OnComplete callback = std::bind(
-              [global_code_complete_cache,
-               non_global_code_complete_cache, is_global_completion,
-               existing_completion,
+              [global_code_complete_cache, non_global_code_complete_cache,
+               is_global_completion, existing_completion,
                msg](const NonElidedVector<lsCompletionItem>& results,
                     bool is_cached_result) {
 
@@ -2926,8 +2932,8 @@ bool QueryDbMainLoop(Config* config,
       }
 
       default: {
-        LOG_S(INFO) << "[querydb] Unhandled IPC message "
-                    << IpcIdToString(message->method_id);
+        LOG_S(FATAL) << "Exiting; unhandled IPC message "
+                     << IpcIdToString(message->method_id);
         exit(1);
       }
     }
@@ -2978,8 +2984,10 @@ void RunQueryDbThread(const std::string& bin_name,
         signature_cache.get());
 
     // No more work left and exit request. Exit.
-    if (!did_work && exit_when_idle && WorkThread::num_active_threads == 0)
+    if (!did_work && exit_when_idle && WorkThread::num_active_threads == 0) {
+      LOG_S(INFO) << "Exiting; exit_when_idle is set and there is no more work";
       exit(0);
+    }
 
     // Cleanup and free any unused memory.
     FreeUnusedMemory();
@@ -3042,6 +3050,7 @@ void LaunchStdinLoop(Config* config,
       }
 
       case IpcId::Exit: {
+        LOG_S(INFO) << "Exiting";
         exit(0);
         break;
       }
@@ -3087,8 +3096,8 @@ void LaunchStdinLoop(Config* config,
       }
 
       default: {
-        std::cerr << "[stdin] Unhandled IPC message "
-                  << IpcIdToString(message->method_id) << std::endl;
+        LOG_S(ERROR) << "Unhandled IPC message "
+                     << IpcIdToString(message->method_id);
         exit(1);
       }
     }
@@ -3131,8 +3140,8 @@ void LaunchStdoutThread(std::unordered_map<IpcId, Timer>* request_times,
         }
 
         default: {
-          std::cerr << "[stdout] Unhandled IPC message "
-                    << IpcIdToString(message->method_id) << std::endl;
+          LOG_S(FATAL) << "Exiting; unhandled IPC message "
+                       << IpcIdToString(message->method_id);
           exit(1);
         }
       }
@@ -3199,33 +3208,33 @@ int main(int argc, char** argv) {
   std::unordered_map<std::string, std::string> options =
       ParseOptions(argc, argv);
 
-  if (HasOption(options, "--test")) {
+  bool print_help = true;
+
+  if (HasOption(options, "--test-unit")) {
+    print_help = false;
     doctest::Context context;
     context.applyCommandLine(argc, argv);
     int res = context.run();
     if (context.shouldExit())
       return res;
+  }
 
-    for (int i = 0; i < 1; ++i)
-      RunTests();
-
-    /*
-    for (int i = 0; i < 1; ++i) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-      std::cerr << "[POST] Memory usage: " << GetProcessMemoryUsedInMb() << "mb"
-    << std::endl;
-    }
-    */
-
+  if (HasOption(options, "--test-index")) {
+    print_help = false;
+    RunIndexTests();
     std::cerr << std::endl << "[Enter] to exit" << std::endl;
     std::cin.get();
-    return 0;
-  } else if (HasOption(options, "--language-server")) {
+  }
+
+  if (HasOption(options, "--language-server")) {
+    print_help = false;
     // std::cerr << "Running language server" << std::endl;
     auto config = MakeUnique<Config>();
     LanguageServerMain(argv[0], config.get(), &waiter);
     return 0;
-  } else {
+  }
+
+  if (print_help) {
     std::cout << R"help(cquery help:
 
   cquery is a low-latency C++ language server.
@@ -3235,7 +3244,8 @@ int main(int argc, char** argv) {
     --language-server
                   Run as a language server. This implements the language
                   server spec over STDIN and STDOUT.
-    --test        Run tests. Does nothing if test support is not compiled in.
+    --test-unit   Run unit tests.
+    --test-index  Run index tests.
 
   Configuration:
     When opening up a directory, cquery will look for a compile_commands.json
@@ -3249,197 +3259,192 @@ int main(int argc, char** argv) {
     describe those options. See |Config| in this source code for a detailed
     list of all currently supported options.
 )help";
-    return 0;
+  }
+
+  return 0;
+}
+
+TEST_SUITE("LexFunctionDeclaration") {
+  TEST_CASE("simple") {
+    std::string buffer_content = " void Foo(); ";
+    lsPosition declaration = CharPos(buffer_content, 'F');
+    std::string insert_text;
+    int newlines_after_name = 0;
+
+    LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
+                           &newlines_after_name);
+    REQUIRE(insert_text == "void Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+
+    LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
+                           &insert_text, &newlines_after_name);
+    REQUIRE(insert_text == "void Type::Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+  }
+
+  TEST_CASE("ctor") {
+    std::string buffer_content = " Foo(); ";
+    lsPosition declaration = CharPos(buffer_content, 'F');
+    std::string insert_text;
+    int newlines_after_name = 0;
+
+    LexFunctionDeclaration(buffer_content, declaration, std::string("Foo"),
+                           &insert_text, &newlines_after_name);
+    REQUIRE(insert_text == "Foo::Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+  }
+
+  TEST_CASE("dtor") {
+    std::string buffer_content = " ~Foo(); ";
+    lsPosition declaration = CharPos(buffer_content, '~');
+    std::string insert_text;
+    int newlines_after_name = 0;
+
+    LexFunctionDeclaration(buffer_content, declaration, std::string("Foo"),
+                           &insert_text, &newlines_after_name);
+    REQUIRE(insert_text == "Foo::~Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+  }
+
+  TEST_CASE("complex return type") {
+    std::string buffer_content = " std::vector<int> Foo(); ";
+    lsPosition declaration = CharPos(buffer_content, 'F');
+    std::string insert_text;
+    int newlines_after_name = 0;
+
+    LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
+                           &newlines_after_name);
+    REQUIRE(insert_text == "std::vector<int> Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+
+    LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
+                           &insert_text, &newlines_after_name);
+    REQUIRE(insert_text == "std::vector<int> Type::Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+  }
+
+  TEST_CASE("extra complex return type") {
+    std::string buffer_content = " std::function < int() > \n Foo(); ";
+    lsPosition declaration = CharPos(buffer_content, 'F');
+    std::string insert_text;
+    int newlines_after_name = 0;
+
+    LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
+                           &newlines_after_name);
+    REQUIRE(insert_text == "std::function < int() > \n Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+
+    LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
+                           &insert_text, &newlines_after_name);
+    REQUIRE(insert_text == "std::function < int() > \n Type::Foo() {\n}");
+    REQUIRE(newlines_after_name == 0);
+  }
+
+  TEST_CASE("parameters") {
+    std::string buffer_content = "void Foo(int a,\n\n    int b); ";
+    lsPosition declaration = CharPos(buffer_content, 'F');
+    std::string insert_text;
+    int newlines_after_name = 0;
+
+    LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
+                           &newlines_after_name);
+    REQUIRE(insert_text == "void Foo(int a,\n\n    int b) {\n}");
+    REQUIRE(newlines_after_name == 2);
+
+    LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
+                           &insert_text, &newlines_after_name);
+    REQUIRE(insert_text == "void Type::Foo(int a,\n\n    int b) {\n}");
+    REQUIRE(newlines_after_name == 2);
   }
 }
 
-TEST_SUITE("LexFunctionDeclaration");
+TEST_SUITE("LexWordAroundPos") {
+  TEST_CASE("edges") {
+    std::string content = "Foobar";
+    REQUIRE(LexWordAroundPos(CharPos(content, 'F'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'o'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'b'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'a'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'r'), content) == "Foobar");
+  }
 
-TEST_CASE("simple") {
-  std::string buffer_content = " void Foo(); ";
-  lsPosition declaration = CharPos(buffer_content, 'F');
-  std::string insert_text;
-  int newlines_after_name = 0;
+  TEST_CASE("simple") {
+    std::string content = "  Foobar  ";
+    REQUIRE(LexWordAroundPos(CharPos(content, 'F'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'o'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'b'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'a'), content) == "Foobar");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'r'), content) == "Foobar");
+  }
 
-  LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
-                         &newlines_after_name);
-  REQUIRE(insert_text == "void Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
+  TEST_CASE("underscores and numbers") {
+    std::string content = "  _my_t5ype7  ";
+    REQUIRE(LexWordAroundPos(CharPos(content, '_'), content) == "_my_t5ype7");
+    REQUIRE(LexWordAroundPos(CharPos(content, '5'), content) == "_my_t5ype7");
+    REQUIRE(LexWordAroundPos(CharPos(content, 'e'), content) == "_my_t5ype7");
+    REQUIRE(LexWordAroundPos(CharPos(content, '7'), content) == "_my_t5ype7");
+  }
 
-  LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
-                         &insert_text, &newlines_after_name);
-  REQUIRE(insert_text == "void Type::Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
+  TEST_CASE("dot, dash, colon are skipped") {
+    std::string content = "1. 2- 3:";
+    REQUIRE(LexWordAroundPos(CharPos(content, '1'), content) == "1");
+    REQUIRE(LexWordAroundPos(CharPos(content, '2'), content) == "2");
+    REQUIRE(LexWordAroundPos(CharPos(content, '3'), content) == "3");
+  }
 }
 
-TEST_CASE("ctor") {
-  std::string buffer_content = " Foo(); ";
-  lsPosition declaration = CharPos(buffer_content, 'F');
-  std::string insert_text;
-  int newlines_after_name = 0;
+TEST_SUITE("FindIncludeLine") {
+  TEST_CASE("in document") {
+    std::vector<std::string> lines = {
+        "#include <bbb>",  // 0
+        "#include <ddd>"   // 1
+    };
 
-  LexFunctionDeclaration(buffer_content, declaration, std::string("Foo"),
-                         &insert_text, &newlines_after_name);
-  REQUIRE(insert_text == "Foo::Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
+    REQUIRE(FindIncludeLine(lines, "#include <bbb>") == nullopt);
+  }
+
+  TEST_CASE("insert before") {
+    std::vector<std::string> lines = {
+        "#include <bbb>",  // 0
+        "#include <ddd>"   // 1
+    };
+
+    REQUIRE(FindIncludeLine(lines, "#include <aaa>") == 0);
+  }
+
+  TEST_CASE("insert middle") {
+    std::vector<std::string> lines = {
+        "#include <bbb>",  // 0
+        "#include <ddd>"   // 1
+    };
+
+    REQUIRE(FindIncludeLine(lines, "#include <ccc>") == 1);
+  }
+
+  TEST_CASE("insert after") {
+    std::vector<std::string> lines = {
+        "#include <bbb>",  // 0
+        "#include <ddd>",  // 1
+        "",                // 2
+    };
+
+    REQUIRE(FindIncludeLine(lines, "#include <eee>") == 2);
+  }
+
+  TEST_CASE("ignore header") {
+    std::vector<std::string> lines = {
+        "// FOOBAR",       // 0
+        "// FOOBAR",       // 1
+        "// FOOBAR",       // 2
+        "// FOOBAR",       // 3
+        "",                // 4
+        "#include <bbb>",  // 5
+        "#include <ddd>",  // 6
+        "",                // 7
+    };
+
+    REQUIRE(FindIncludeLine(lines, "#include <a>") == 5);
+    REQUIRE(FindIncludeLine(lines, "#include <c>") == 6);
+    REQUIRE(FindIncludeLine(lines, "#include <e>") == 7);
+  }
 }
-
-TEST_CASE("dtor") {
-  std::string buffer_content = " ~Foo(); ";
-  lsPosition declaration = CharPos(buffer_content, '~');
-  std::string insert_text;
-  int newlines_after_name = 0;
-
-  LexFunctionDeclaration(buffer_content, declaration, std::string("Foo"),
-                         &insert_text, &newlines_after_name);
-  REQUIRE(insert_text == "Foo::~Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
-}
-
-TEST_CASE("complex return type") {
-  std::string buffer_content = " std::vector<int> Foo(); ";
-  lsPosition declaration = CharPos(buffer_content, 'F');
-  std::string insert_text;
-  int newlines_after_name = 0;
-
-  LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
-                         &newlines_after_name);
-  REQUIRE(insert_text == "std::vector<int> Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
-
-  LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
-                         &insert_text, &newlines_after_name);
-  REQUIRE(insert_text == "std::vector<int> Type::Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
-}
-
-TEST_CASE("extra complex return type") {
-  std::string buffer_content = " std::function < int() > \n Foo(); ";
-  lsPosition declaration = CharPos(buffer_content, 'F');
-  std::string insert_text;
-  int newlines_after_name = 0;
-
-  LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
-                         &newlines_after_name);
-  REQUIRE(insert_text == "std::function < int() > \n Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
-
-  LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
-                         &insert_text, &newlines_after_name);
-  REQUIRE(insert_text == "std::function < int() > \n Type::Foo() {\n}");
-  REQUIRE(newlines_after_name == 0);
-}
-
-TEST_CASE("parameters") {
-  std::string buffer_content = "void Foo(int a,\n\n    int b); ";
-  lsPosition declaration = CharPos(buffer_content, 'F');
-  std::string insert_text;
-  int newlines_after_name = 0;
-
-  LexFunctionDeclaration(buffer_content, declaration, nullopt, &insert_text,
-                         &newlines_after_name);
-  REQUIRE(insert_text == "void Foo(int a,\n\n    int b) {\n}");
-  REQUIRE(newlines_after_name == 2);
-
-  LexFunctionDeclaration(buffer_content, declaration, std::string("Type"),
-                         &insert_text, &newlines_after_name);
-  REQUIRE(insert_text == "void Type::Foo(int a,\n\n    int b) {\n}");
-  REQUIRE(newlines_after_name == 2);
-}
-
-TEST_SUITE_END();
-
-TEST_SUITE("LexWordAroundPos");
-
-TEST_CASE("edges") {
-  std::string content = "Foobar";
-  REQUIRE(LexWordAroundPos(CharPos(content, 'F'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'o'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'b'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'a'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'r'), content) == "Foobar");
-}
-
-TEST_CASE("simple") {
-  std::string content = "  Foobar  ";
-  REQUIRE(LexWordAroundPos(CharPos(content, 'F'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'o'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'b'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'a'), content) == "Foobar");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'r'), content) == "Foobar");
-}
-
-TEST_CASE("underscores and numbers") {
-  std::string content = "  _my_t5ype7  ";
-  REQUIRE(LexWordAroundPos(CharPos(content, '_'), content) == "_my_t5ype7");
-  REQUIRE(LexWordAroundPos(CharPos(content, '5'), content) == "_my_t5ype7");
-  REQUIRE(LexWordAroundPos(CharPos(content, 'e'), content) == "_my_t5ype7");
-  REQUIRE(LexWordAroundPos(CharPos(content, '7'), content) == "_my_t5ype7");
-}
-
-TEST_CASE("dot, dash, colon are skipped") {
-  std::string content = "1. 2- 3:";
-  REQUIRE(LexWordAroundPos(CharPos(content, '1'), content) == "1");
-  REQUIRE(LexWordAroundPos(CharPos(content, '2'), content) == "2");
-  REQUIRE(LexWordAroundPos(CharPos(content, '3'), content) == "3");
-}
-
-TEST_SUITE_END();
-
-TEST_SUITE("FindIncludeLine");
-
-TEST_CASE("in document") {
-  std::vector<std::string> lines = {
-      "#include <bbb>",  // 0
-      "#include <ddd>"   // 1
-  };
-
-  REQUIRE(FindIncludeLine(lines, "#include <bbb>") == nullopt);
-}
-
-TEST_CASE("insert before") {
-  std::vector<std::string> lines = {
-      "#include <bbb>",  // 0
-      "#include <ddd>"   // 1
-  };
-
-  REQUIRE(FindIncludeLine(lines, "#include <aaa>") == 0);
-}
-
-TEST_CASE("insert middle") {
-  std::vector<std::string> lines = {
-      "#include <bbb>",  // 0
-      "#include <ddd>"   // 1
-  };
-
-  REQUIRE(FindIncludeLine(lines, "#include <ccc>") == 1);
-}
-
-TEST_CASE("insert after") {
-  std::vector<std::string> lines = {
-      "#include <bbb>",  // 0
-      "#include <ddd>",  // 1
-      "",                // 2
-  };
-
-  REQUIRE(FindIncludeLine(lines, "#include <eee>") == 2);
-}
-
-TEST_CASE("ignore header") {
-  std::vector<std::string> lines = {
-      "// FOOBAR",       // 0
-      "// FOOBAR",       // 1
-      "// FOOBAR",       // 2
-      "// FOOBAR",       // 3
-      "",                // 4
-      "#include <bbb>",  // 5
-      "#include <ddd>",  // 6
-      "",                // 7
-  };
-
-  REQUIRE(FindIncludeLine(lines, "#include <a>") == 5);
-  REQUIRE(FindIncludeLine(lines, "#include <c>") == 6);
-  REQUIRE(FindIncludeLine(lines, "#include <e>") == 7);
-}
-
-TEST_SUITE_END();
