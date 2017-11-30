@@ -468,8 +468,6 @@ optional<lsSymbolInformation> GetSymbolInfo(QueryDatabase* db,
 
       lsSymbolInformation info;
       info.name = type.def->short_name;
-      if (type.def->detailed_name != type.def->short_name)
-        info.containerName = type.def->detailed_name;
       info.kind = lsSymbolKind::Class;
       return info;
     }
@@ -480,26 +478,31 @@ optional<lsSymbolInformation> GetSymbolInfo(QueryDatabase* db,
 
       lsSymbolInformation info;
       info.name = func.def->short_name;
-      info.containerName = func.def->detailed_name;
       info.kind = lsSymbolKind::Function;
 
       if (func.def->declaring_type.has_value()) {
         QueryType& container = db->types[func.def->declaring_type->id];
-        if (container.def)
+        if (container.def) {
           info.kind = lsSymbolKind::Method;
+          info.containerName = container.def->short_name;
+        }
       }
 
       return info;
     }
     case SymbolKind::Var: {
       QueryVar& var = db->vars[symbol.idx];
-      if (!var.def)
+      if (!var.def || !var.def->declaring_type)
         return nullopt;
 
       lsSymbolInformation info;
       info.name += var.def->short_name;
-      info.containerName = var.def->detailed_name;
       info.kind = lsSymbolKind::Variable;
+      QueryTypeId& declaring_type = var.def->declaring_type.value();
+      QueryType& type = db->types[declaring_type.id];
+      if (type.def) {
+        info.containerName = type.def->short_name;
+      }
       return info;
     }
     case SymbolKind::Invalid: {
