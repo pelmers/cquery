@@ -492,16 +492,18 @@ optional<lsSymbolInformation> GetSymbolInfo(QueryDatabase* db,
     }
     case SymbolKind::Var: {
       QueryVar& var = db->vars[symbol.idx];
-      if (!var.def || !var.def->declaring_type)
+      if (!var.def || var.def->is_local)
         return nullopt;
 
       lsSymbolInformation info;
       info.name += var.def->short_name;
       info.kind = lsSymbolKind::Variable;
-      QueryTypeId& declaring_type = var.def->declaring_type.value();
-      QueryType& type = db->types[declaring_type.id];
-      if (type.def) {
-        info.containerName = type.def->short_name;
+      if (var.def->declaring_type.has_value()) {
+        QueryTypeId& declaring_type = var.def->declaring_type.value();
+        QueryType& type = db->types[declaring_type.id];
+        if (type.def) {
+          info.containerName = type.def->short_name;
+        }
       }
       return info;
     }
