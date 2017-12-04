@@ -118,6 +118,18 @@ std::unique_ptr<ClangTranslationUnit> ClangTranslationUnit::Create(
       LOG_S(ERROR) << "libclang had ast read error for " << filepath
                    << " with args " << StringJoin(args);
       return nullptr;
+    case CXError_RefactoringActionUnavailable:
+      LOG_S(ERROR) << "libclang had an unavailable refactoring action error for"
+                   << " " << filepath << " with args " << StringJoin(args);
+      return nullptr;
+    case CXError_RefactoringNameSizeMismatch:
+      LOG_S(ERROR) << "libclang had a refactoring name size mismatch error for "
+                   << filepath << " with args " << StringJoin(args);
+      return nullptr;
+    case CXError_RefactoringNameInvalid:
+      LOG_S(ERROR) << "libclang had an invalid refactoring name error for "
+                   << filepath << " with args " << StringJoin(args);
+      return nullptr;
   }
 
   return nullptr;
