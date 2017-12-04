@@ -7,6 +7,7 @@
 #include "ipc_manager.h"
 #include "language_server_api.h"
 #include "lex_utils.h"
+#include "lru_cache.h"
 #include "match.h"
 #include "options.h"
 #include "platform.h"
@@ -84,7 +85,7 @@ bool ShouldDisplayIpcTiming(IpcId id) {
   switch (id) {
     case IpcId::TextDocumentPublishDiagnostics:
     case IpcId::CqueryPublishInactiveRegions:
-    case IpcId::Cout:
+    case IpcId::Unknown:
       return false;
     default:
       return true;
@@ -125,7 +126,7 @@ bool FindFileOrFail(QueryDatabase* db,
     out.id = *id;
     out.error.code = lsErrorCodes::InternalError;
     out.error.message = "Unable to find file " + absolute_path;
-    IpcManager::instance()->SendOutMessageToClient(IpcId::Cout, out);
+    IpcManager::WriteStdout(IpcId::Unknown, out);
   }
 
   return false;
@@ -140,13 +141,62 @@ void EmitInactiveLines(WorkingFile* working_file,
     if (ls_skipped)
       out.params.inactiveRegions.push_back(*ls_skipped);
   }
-  IpcManager::instance()->SendOutMessageToClient(
-      IpcId::CqueryPublishInactiveRegions, out);
+  IpcManager::WriteStdout(IpcId::CqueryPublishInactiveRegions, out);
 }
 
+// Caches symbols for a single file for semantic highlighting to provide
+// relatively stable ids. Only supports xxx files at a time.
+struct SemanticHighlightSymbolCache {
+  struct Entry {
+    // The path this cache belongs to.
+    std::string path;
+    // Detailed symbol name to stable id.
+    using TNameToId = std::unordered_map<std::string, int>;
+    TNameToId detailed_type_name_to_stable_id;
+    TNameToId detailed_func_name_to_stable_id;
+    TNameToId detailed_var_name_to_stable_id;
+
+    explicit Entry(const std::string& path) : path(path) {}
+
+    int GetStableId(SymbolKind kind, const std::string& detailed_name) {
+      TNameToId* map = nullptr;
+      switch (kind) {
+        case SymbolKind::Type:
+          map = &detailed_type_name_to_stable_id;
+          break;
+        case SymbolKind::Func:
+          map = &detailed_func_name_to_stable_id;
+          break;
+        case SymbolKind::Var:
+          map = &detailed_var_name_to_stable_id;
+          break;
+        default:
+          assert(false);
+          return 0;
+      }
+      assert(map);
+      auto it = map->find(detailed_name);
+      if (it != map->end())
+        return it->second;
+      return (*map)[detailed_name] = map->size();
+    }
+  };
+
+  constexpr static int kCacheSize = 10;
+  LruCache<std::string, Entry> cache_;
+
+  SemanticHighlightSymbolCache() : cache_(kCacheSize) {}
+
+  std::shared_ptr<Entry> GetCacheForFile(const std::string& path) {
+    return cache_.Get(path, [&]() { return std::make_shared<Entry>(path); });
+  }
+};
+
 void EmitSemanticHighlighting(QueryDatabase* db,
+                              SemanticHighlightSymbolCache* semantic_cache,
                               WorkingFile* working_file,
                               QueryFile* file) {
+  assert(file->def);
   auto map_symbol_kind_to_symbol_type = [](SymbolKind kind) {
     switch (kind) {
       case SymbolKind::Type:
@@ -161,17 +211,25 @@ void EmitSemanticHighlighting(QueryDatabase* db,
     }
   };
 
+  auto semantic_cache_for_file =
+      semantic_cache->GetCacheForFile(file->def->path);
+
   // Group symbols together.
   std::unordered_map<SymbolIdx, Out_CqueryPublishSemanticHighlighting::Symbol>
       grouped_symbols;
   for (SymbolRef sym : file->def->all_symbols) {
+    std::string detailed_name;
     bool is_type_member = false;
+    // This switch statement also filters out symbols that are not highlighted.
     switch (sym.idx.kind) {
       case SymbolKind::Func: {
         QueryFunc* func = &db->funcs[sym.idx.idx];
         if (!func->def)
           continue;  // applies to for loop
+        if (func->def->is_operator)
+          continue;  // applies to for loop
         is_type_member = func->def->declaring_type.has_value();
+        detailed_name = func->def->short_name;
         break;
       }
       case SymbolKind::Var: {
@@ -181,6 +239,14 @@ void EmitSemanticHighlighting(QueryDatabase* db,
         if (!var->def->is_local && !var->def->declaring_type)
           continue;  // applies to for loop
         is_type_member = var->def->declaring_type.has_value();
+        detailed_name = var->def->short_name;
+        break;
+      }
+      case SymbolKind::Type: {
+        QueryType* type = &db->types[sym.idx.idx];
+        if (!type->def)
+          continue;  // applies to for loop
+        detailed_name = type->def->detailed_name;
         break;
       }
       default:
@@ -194,8 +260,10 @@ void EmitSemanticHighlighting(QueryDatabase* db,
         it->second.ranges.push_back(*loc);
       } else {
         Out_CqueryPublishSemanticHighlighting::Symbol symbol;
+        symbol.stableId =
+            semantic_cache_for_file->GetStableId(sym.idx.kind, detailed_name);
         symbol.type = map_symbol_kind_to_symbol_type(sym.idx.kind);
-        symbol.is_type_member = is_type_member;
+        symbol.isTypeMember = is_type_member;
         symbol.ranges.push_back(*loc);
         grouped_symbols[sym.idx] = symbol;
       }
@@ -207,8 +275,7 @@ void EmitSemanticHighlighting(QueryDatabase* db,
   out.params.uri = lsDocumentUri::FromPath(working_file->filename);
   for (auto& entry : grouped_symbols)
     out.params.symbols.push_back(entry.second);
-  IpcManager::instance()->SendOutMessageToClient(
-      IpcId::CqueryPublishSemanticHighlighting, out);
+  IpcManager::WriteStdout(IpcId::CqueryPublishSemanticHighlighting, out);
 }
 
 optional<int> FindIncludeLine(const std::vector<std::string>& lines,
@@ -453,11 +520,10 @@ void EmitDiagnostics(WorkingFiles* working_files,
                      std::string path,
                      NonElidedVector<lsDiagnostic> diagnostics) {
   // Emit diagnostics.
-  Out_TextDocumentPublishDiagnostics diagnostic_response;
-  diagnostic_response.params.uri = lsDocumentUri::FromPath(path);
-  diagnostic_response.params.diagnostics = diagnostics;
-  IpcManager::instance()->SendOutMessageToClient(
-      IpcId::TextDocumentPublishDiagnostics, diagnostic_response);
+  Out_TextDocumentPublishDiagnostics out;
+  out.params.uri = lsDocumentUri::FromPath(path);
+  out.params.diagnostics = diagnostics;
+  IpcManager::WriteStdout(IpcId::TextDocumentPublishDiagnostics, out);
 
   // Cache diagnostics so we can show fixits.
   working_files->DoActionOnFile(path, [&](WorkingFile* working_file) {
@@ -640,6 +706,7 @@ void RegisterMessageTypes() {
   MessageRegistry::instance()->Register<Ipc_InitializedNotification>();
   MessageRegistry::instance()->Register<Ipc_Exit>();
   MessageRegistry::instance()->Register<Ipc_TextDocumentDidOpen>();
+  MessageRegistry::instance()->Register<Ipc_CqueryTextDocumentDidView>();
   MessageRegistry::instance()->Register<Ipc_TextDocumentDidChange>();
   MessageRegistry::instance()->Register<Ipc_TextDocumentDidClose>();
   MessageRegistry::instance()->Register<Ipc_TextDocumentDidSave>();
@@ -800,7 +867,7 @@ struct IndexManager {
 };
 
 // Send indexing progress to client if reporting is enabled.
-void EmitProgress(Config *config, QueueManager* queue) {
+void EmitProgress(Config* config, QueueManager* queue) {
   if (config->enableProgressReports) {
     Out_Progress out;
     out.params.indexRequestCount = queue->index_request.Size();
@@ -809,7 +876,7 @@ void EmitProgress(Config *config, QueueManager* queue) {
     out.params.onIdMappedCount = queue->on_id_mapped.Size();
     out.params.onIndexedCount = queue->on_indexed.Size();
 
-    IpcManager::instance()->SendOutMessageToClient(IpcId::Cout, out);
+    IpcManager::WriteStdout(IpcId::Unknown, out);
   }
 }
 
@@ -1156,12 +1223,11 @@ bool IndexMain_DoCreateIndexUpdate(Config* config,
   PRINT_SECTION(index_make_delta);
   output << "\n       total: " << FormatMicroseconds(total);
   output << " path: " << response->current_index->path;
-  output << std::endl;
-  std::cerr << output.rdbuf();
+  LOG_S(INFO) << output.rdbuf();
 #undef PRINT_SECTION
 
   if (response->is_interactive)
-    std::cerr << "Applying IndexUpdate" << std::endl << update.ToString() << std::endl;
+    LOG_S(INFO) << "Applying IndexUpdate" << std::endl << update.ToString();
 #endif
 
   Index_OnIndexed reply(update, response->perf);
@@ -1260,6 +1326,7 @@ bool QueryDb_ImportMain(Config* config,
                         QueryDatabase* db,
                         ImportManager* import_manager,
                         QueueManager* queue,
+                        SemanticHighlightSymbolCache* semantic_cache,
                         WorkingFiles* working_files) {
   EmitProgress(config, queue);
 
@@ -1364,7 +1431,7 @@ bool QueryDb_ImportMain(Config* config,
         QueryFileId file_id =
             db->usr_to_file[LowerPathIfCaseInsensitive(working_file->filename)];
         QueryFile* file = &db->files[file_id.id];
-        EmitSemanticHighlighting(db, working_file, file);
+        EmitSemanticHighlighting(db, semantic_cache, working_file, file);
       }
     }
 
@@ -1404,6 +1471,7 @@ bool QueryDbMainLoop(Config* config,
                      FileConsumer::SharedState* file_consumer_shared,
                      ImportManager* import_manager,
                      TimestampManager* timestamp_manager,
+                     SemanticHighlightSymbolCache* semantic_cache,
                      WorkingFiles* working_files,
                      ClangCompleteManager* clang_complete,
                      IncludeComplete* include_complete,
@@ -1415,7 +1483,7 @@ bool QueryDbMainLoop(Config* config,
   bool did_work = false;
 
   std::vector<std::unique_ptr<BaseIpcMessage>> messages =
-      ipc->GetMessages(IpcManager::Destination::Server);
+      ipc->for_querydb.DequeueAll();
   for (auto& message : messages) {
     did_work = true;
 
@@ -1427,7 +1495,7 @@ bool QueryDbMainLoop(Config* config,
         rapidjson::StringBuffer output;
         Writer writer(output);
         Reflect(writer, request->params.initializationOptions);
-        std::cerr << output.GetString() << std::endl;
+        LOG_S(INFO) << "Init parameters: " << output.GetString();
 
         if (request->params.rootUri) {
           std::string project_path = request->params.rootUri->GetPath();
@@ -1443,13 +1511,13 @@ bool QueryDbMainLoop(Config* config,
           *config = *request->params.initializationOptions;
 
           // Check client version.
-          if (config->clientVersion != kExpectedClientVersion &&
-              config->clientVersion != -1 /*disable check*/) {
+          if (config->clientVersion.has_value() &&
+              *config->clientVersion != kExpectedClientVersion) {
             Out_ShowLogMessage out;
             out.display_type = Out_ShowLogMessage::DisplayType::Show;
             out.params.type = lsMessageType::Error;
             out.params.message =
-                "cquery client (v" + std::to_string(config->clientVersion) +
+                "cquery client (v" + std::to_string(*config->clientVersion) +
                 ") and server (v" + std::to_string(kExpectedClientVersion) +
                 ") version mismatch. Please update ";
             if (config->clientVersion > kExpectedClientVersion)
@@ -1470,7 +1538,6 @@ bool QueryDbMainLoop(Config* config,
 
           config->cacheDirectory = NormalizePath(config->cacheDirectory);
           EnsureEndsInSlash(config->cacheDirectory);
-          MakeDirectoryRecursive(config->cacheDirectory);
 
           // Ensure there is a resource directory.
           if (config->resourceDirectory.empty()) {
@@ -1490,65 +1557,63 @@ bool QueryDbMainLoop(Config* config,
           // TODO: query request->params.capabilities.textDocument and support
           // only things the client supports.
 
-          auto response = Out_InitializeResponse();
-          response.id = request->id;
+          Out_InitializeResponse out;
+          out.id = request->id;
 
-          // response.result.capabilities.textDocumentSync =
+          // out.result.capabilities.textDocumentSync =
           // lsTextDocumentSyncOptions();
-          // response.result.capabilities.textDocumentSync->openClose = true;
-          // response.result.capabilities.textDocumentSync->change =
+          // out.result.capabilities.textDocumentSync->openClose = true;
+          // out.result.capabilities.textDocumentSync->change =
           // lsTextDocumentSyncKind::Full;
-          // response.result.capabilities.textDocumentSync->willSave = true;
-          // response.result.capabilities.textDocumentSync->willSaveWaitUntil =
+          // out.result.capabilities.textDocumentSync->willSave = true;
+          // out.result.capabilities.textDocumentSync->willSaveWaitUntil =
           // true;
-          response.result.capabilities.textDocumentSync =
+          out.result.capabilities.textDocumentSync =
               lsTextDocumentSyncKind::Incremental;
 
-          response.result.capabilities.renameProvider = true;
+          out.result.capabilities.renameProvider = true;
 
-          response.result.capabilities.completionProvider =
-              lsCompletionOptions();
-          response.result.capabilities.completionProvider->resolveProvider =
-              false;
+          out.result.capabilities.completionProvider = lsCompletionOptions();
+          out.result.capabilities.completionProvider->resolveProvider = false;
           // vscode doesn't support trigger character sequences, so we use ':'
           // for
           // '::' and '>' for '->'. See
           // https://github.com/Microsoft/language-server-protocol/issues/138.
-          response.result.capabilities.completionProvider->triggerCharacters = {
+          out.result.capabilities.completionProvider->triggerCharacters = {
               ".", ":", ">", "#"};
 
-          response.result.capabilities.signatureHelpProvider =
+          out.result.capabilities.signatureHelpProvider =
               lsSignatureHelpOptions();
           // NOTE: If updating signature help tokens make sure to also update
           // WorkingFile::FindClosestCallNameInBuffer.
-          response.result.capabilities.signatureHelpProvider
-              ->triggerCharacters = {"(", ","};
+          out.result.capabilities.signatureHelpProvider->triggerCharacters = {
+              "(", ","};
 
-          response.result.capabilities.codeLensProvider = lsCodeLensOptions();
-          response.result.capabilities.codeLensProvider->resolveProvider =
-              false;
+          out.result.capabilities.codeLensProvider = lsCodeLensOptions();
+          out.result.capabilities.codeLensProvider->resolveProvider = false;
 
-          response.result.capabilities.definitionProvider = true;
-          response.result.capabilities.documentHighlightProvider = true;
-          response.result.capabilities.hoverProvider = true;
-          response.result.capabilities.referencesProvider = true;
+          out.result.capabilities.definitionProvider = true;
+          out.result.capabilities.documentHighlightProvider = true;
+          out.result.capabilities.hoverProvider = true;
+          out.result.capabilities.referencesProvider = true;
 
-          response.result.capabilities.codeActionProvider = true;
+          out.result.capabilities.codeActionProvider = true;
 
-          response.result.capabilities.documentSymbolProvider = true;
-          response.result.capabilities.workspaceSymbolProvider = true;
+          out.result.capabilities.documentSymbolProvider = true;
+          out.result.capabilities.workspaceSymbolProvider = true;
 
-          response.result.capabilities.documentLinkProvider =
+          out.result.capabilities.documentLinkProvider =
               lsDocumentLinkOptions();
-          response.result.capabilities.documentLinkProvider->resolveProvider =
-              false;
+          out.result.capabilities.documentLinkProvider->resolveProvider = false;
 
-          ipc->SendOutMessageToClient(IpcId::Initialize, response);
+          IpcManager::WriteStdout(IpcId::Initialize, out);
 
           // Set project root.
           config->projectRoot =
               NormalizePath(request->params.rootUri->GetPath());
           EnsureEndsInSlash(config->projectRoot);
+          MakeDirectoryRecursive(config->cacheDirectory +
+                                 EscapeFileName(config->projectRoot));
 
           // Start indexer threads.
           if (config->indexerCount == 0) {
@@ -1573,8 +1638,8 @@ bool QueryDbMainLoop(Config* config,
 
           // Open up / load the project.
           project->Load(config->extraClangArguments,
-                        config->compilationDatabaseDirectory,
-                        project_path, config->resourceDirectory);
+                        config->compilationDatabaseDirectory, project_path,
+                        config->resourceDirectory);
           time.ResetAndPrint("[perf] Loaded compilation entries (" +
                              std::to_string(project->entries.size()) +
                              " files)");
@@ -1586,9 +1651,6 @@ bool QueryDbMainLoop(Config* config,
           time.Reset();
           project->ForAllFilteredFiles(
               config, [&](int i, const Project::Entry& entry) {
-                // std::cerr << "[" << i << "/" << (project->entries.size() - 1)
-                //  << "] Dispatching index request for file " << entry.filename
-                //  << std::endl;
                 bool is_interactive =
                     working_files->GetFileByFilename(entry.filename) != nullptr;
                 queue->index_request.Enqueue(Index_Request(
@@ -1656,24 +1718,24 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_CqueryTypeHierarchyTree response;
-        response.id = msg->id;
+        Out_CqueryTypeHierarchyTree out;
+        out.id = msg->id;
 
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           if (ref.idx.kind == SymbolKind::Type) {
-            response.result = BuildInheritanceHierarchyForType(
+            out.result = BuildInheritanceHierarchyForType(
                 db, working_files, QueryTypeId(ref.idx.idx));
             break;
           }
           if (ref.idx.kind == SymbolKind::Func) {
-            response.result = BuildInheritanceHierarchyForFunc(
+            out.result = BuildInheritanceHierarchyForFunc(
                 db, working_files, QueryFuncId(ref.idx.idx));
             break;
           }
         }
 
-        ipc->SendOutMessageToClient(IpcId::CqueryTypeHierarchyTree, response);
+        IpcManager::WriteStdout(IpcId::CqueryTypeHierarchyTree, out);
         break;
       }
 
@@ -1688,34 +1750,33 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_CqueryCallTree response;
-        response.id = msg->id;
+        Out_CqueryCallTree out;
+        out.id = msg->id;
 
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           if (ref.idx.kind == SymbolKind::Func) {
-            response.result = BuildInitialCallTree(db, working_files,
-                                                   QueryFuncId(ref.idx.idx));
+            out.result = BuildInitialCallTree(db, working_files,
+                                              QueryFuncId(ref.idx.idx));
             break;
           }
         }
 
-        ipc->SendOutMessageToClient(IpcId::CqueryCallTreeInitial, response);
+        IpcManager::WriteStdout(IpcId::CqueryCallTreeInitial, out);
         break;
       }
 
       case IpcId::CqueryCallTreeExpand: {
         auto msg = message->As<Ipc_CqueryCallTreeExpand>();
 
-        Out_CqueryCallTree response;
-        response.id = msg->id;
+        Out_CqueryCallTree out;
+        out.id = msg->id;
 
         auto func_id = db->usr_to_func.find(msg->params.usr);
         if (func_id != db->usr_to_func.end())
-          response.result =
-              BuildExpandCallTree(db, working_files, func_id->second);
+          out.result = BuildExpandCallTree(db, working_files, func_id->second);
 
-        ipc->SendOutMessageToClient(IpcId::CqueryCallTreeExpand, response);
+        IpcManager::WriteStdout(IpcId::CqueryCallTreeExpand, out);
         break;
       }
 
@@ -1730,18 +1791,18 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_LocationList response;
-        response.id = msg->id;
+        Out_LocationList out;
+        out.id = msg->id;
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           if (ref.idx.kind == SymbolKind::Type) {
             QueryType& type = db->types[ref.idx.idx];
             std::vector<QueryLocation> locations =
                 ToQueryLocation(db, type.instances);
-            response.result = GetLsLocations(db, working_files, locations);
+            out.result = GetLsLocations(db, working_files, locations);
           }
         }
-        ipc->SendOutMessageToClient(IpcId::CqueryVars, response);
+        IpcManager::WriteStdout(IpcId::CqueryVars, out);
         break;
       }
 
@@ -1756,8 +1817,8 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_LocationList response;
-        response.id = msg->id;
+        Out_LocationList out;
+        out.id = msg->id;
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           if (ref.idx.kind == SymbolKind::Func) {
@@ -1771,10 +1832,10 @@ bool QueryDbMainLoop(Config* config,
                  GetCallersForAllDerivedFunctions(db, func))
               locations.push_back(func_ref.loc);
 
-            response.result = GetLsLocations(db, working_files, locations);
+            out.result = GetLsLocations(db, working_files, locations);
           }
         }
-        ipc->SendOutMessageToClient(IpcId::CqueryCallers, response);
+        IpcManager::WriteStdout(IpcId::CqueryCallers, out);
         break;
       }
 
@@ -1789,8 +1850,8 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_LocationList response;
-        response.id = msg->id;
+        Out_LocationList out;
+        out.id = msg->id;
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           if (ref.idx.kind == SymbolKind::Type) {
@@ -1799,7 +1860,7 @@ bool QueryDbMainLoop(Config* config,
               continue;
             std::vector<QueryLocation> locations =
                 ToQueryLocation(db, type.def->parents);
-            response.result = GetLsLocations(db, working_files, locations);
+            out.result = GetLsLocations(db, working_files, locations);
           } else if (ref.idx.kind == SymbolKind::Func) {
             QueryFunc& func = db->funcs[ref.idx.idx];
             optional<QueryLocation> location =
@@ -1810,10 +1871,10 @@ bool QueryDbMainLoop(Config* config,
                 GetLsLocation(db, working_files, *location);
             if (!ls_loc)
               continue;
-            response.result.push_back(*ls_loc);
+            out.result.push_back(*ls_loc);
           }
         }
-        ipc->SendOutMessageToClient(IpcId::CqueryBase, response);
+        IpcManager::WriteStdout(IpcId::CqueryBase, out);
         break;
       }
 
@@ -1828,23 +1889,23 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_LocationList response;
-        response.id = msg->id;
+        Out_LocationList out;
+        out.id = msg->id;
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           if (ref.idx.kind == SymbolKind::Type) {
             QueryType& type = db->types[ref.idx.idx];
             std::vector<QueryLocation> locations =
                 ToQueryLocation(db, type.derived);
-            response.result = GetLsLocations(db, working_files, locations);
+            out.result = GetLsLocations(db, working_files, locations);
           } else if (ref.idx.kind == SymbolKind::Func) {
             QueryFunc& func = db->funcs[ref.idx.idx];
             std::vector<QueryLocation> locations =
                 ToQueryLocation(db, func.derived);
-            response.result = GetLsLocations(db, working_files, locations);
+            out.result = GetLsLocations(db, working_files, locations);
           }
         }
-        ipc->SendOutMessageToClient(IpcId::CqueryDerived, response);
+        IpcManager::WriteStdout(IpcId::CqueryDerived, out);
         break;
       }
 
@@ -1867,7 +1928,7 @@ bool QueryDbMainLoop(Config* config,
         FindFileOrFail(db, nullopt, path, &file);
         if (file && file->def) {
           EmitInactiveLines(working_file, file->def->inactive_regions);
-          EmitSemanticHighlighting(db, working_file, file);
+          EmitSemanticHighlighting(db, semantic_cache, working_file, file);
         }
 
         time.ResetAndPrint(
@@ -1886,6 +1947,25 @@ bool QueryDbMainLoop(Config* config,
         break;
       }
 
+      case IpcId::CqueryTextDocumentDidView: {
+        auto msg = message->As<Ipc_CqueryTextDocumentDidView>();
+        std::string path = msg->params.textDocumentUri.GetPath();
+
+        WorkingFile* working_file = working_files->GetFileByFilename(path);
+        if (!working_file)
+          break;
+        QueryFile* file = nullptr;
+        if (!FindFileOrFail(db, nullopt, path, &file))
+          break;
+
+        clang_complete->NotifyView(path);
+        if (file->def) {
+          EmitInactiveLines(working_file, file->def->inactive_regions);
+          EmitSemanticHighlighting(db, semantic_cache, working_file, file);
+        }
+        break;
+      }
+
       case IpcId::TextDocumentDidChange: {
         auto msg = message->As<Ipc_TextDocumentDidChange>();
         std::string path = msg->params.textDocument.uri.GetPath();
@@ -1901,10 +1981,9 @@ bool QueryDbMainLoop(Config* config,
         std::string path = msg->params.textDocument.uri.GetPath();
 
         // Clear any diagnostics for the file.
-        Out_TextDocumentPublishDiagnostics diag;
-        diag.params.uri = msg->params.textDocument.uri;
-        IpcManager::instance()->SendOutMessageToClient(
-            IpcId::TextDocumentPublishDiagnostics, diag);
+        Out_TextDocumentPublishDiagnostics out;
+        out.params.uri = msg->params.textDocument.uri;
+        IpcManager::WriteStdout(IpcId::TextDocumentPublishDiagnostics, out);
 
         // Remove internal state.
         working_files->OnClose(msg->params);
@@ -1951,19 +2030,19 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_TextDocumentRename response;
-        response.id = msg->id;
+        Out_TextDocumentRename out;
+        out.id = msg->id;
 
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           // Found symbol. Return references to rename.
           std::vector<QueryLocation> uses = GetUsesOfSymbol(db, ref.idx);
-          response.result =
+          out.result =
               BuildWorkspaceEdit(db, working_files, uses, msg->params.newName);
           break;
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentRename, response);
+        IpcManager::WriteStdout(IpcId::TextDocumentRename, out);
         break;
       }
 
@@ -1982,22 +2061,21 @@ bool QueryDbMainLoop(Config* config,
           buffer_line = file->all_buffer_lines[msg->params.position.line];
 
         if (ShouldRunIncludeCompletion(buffer_line)) {
-          Out_TextDocumentComplete complete_response;
-          complete_response.id = msg->id;
+          Out_TextDocumentComplete out;
+          out.id = msg->id;
 
           {
             std::unique_lock<std::mutex> lock(
                 include_complete->completion_items_mutex, std::defer_lock);
             if (include_complete->is_scanning)
               lock.lock();
-            complete_response.result.items.assign(
-                include_complete->completion_items.begin(),
-                include_complete->completion_items.end());
+            out.result.items.assign(include_complete->completion_items.begin(),
+                                    include_complete->completion_items.end());
             if (lock)
               lock.unlock();
 
             // Update textEdit params.
-            for (lsCompletionItem& item : complete_response.result.items) {
+            for (lsCompletionItem& item : out.result.items) {
               item.textEdit->range.start.line = msg->params.position.line;
               item.textEdit->range.start.character = 0;
               item.textEdit->range.end.line = msg->params.position.line;
@@ -2005,9 +2083,8 @@ bool QueryDbMainLoop(Config* config,
             }
           }
 
-          FilterCompletionResponse(&complete_response, buffer_line);
-          ipc->SendOutMessageToClient(IpcId::TextDocumentCompletion,
-                                      complete_response);
+          FilterCompletionResponse(&out, buffer_line);
+          IpcManager::WriteStdout(IpcId::TextDocumentCompletion, out);
         } else {
           bool is_global_completion = false;
           std::string existing_completion;
@@ -2022,16 +2099,13 @@ bool QueryDbMainLoop(Config* config,
                is_global_completion, existing_completion,
                msg](const NonElidedVector<lsCompletionItem>& results,
                     bool is_cached_result) {
-
-                Out_TextDocumentComplete complete_response;
-                complete_response.id = msg->id;
-                complete_response.result.items = results;
+                Out_TextDocumentComplete out;
+                out.id = msg->id;
+                out.result.items = results;
 
                 // Emit completion results.
-                FilterCompletionResponse(&complete_response,
-                                         existing_completion);
-                IpcManager::instance()->SendOutMessageToClient(
-                    IpcId::TextDocumentCompletion, complete_response);
+                FilterCompletionResponse(&out, existing_completion);
+                IpcManager::WriteStdout(IpcId::TextDocumentCompletion, out);
 
                 // Cache completion results.
                 if (!is_cached_result) {
@@ -2065,7 +2139,6 @@ bool QueryDbMainLoop(Config* config,
                 [global_code_complete_cache](
                     NonElidedVector<lsCompletionItem> results,
                     bool is_cached_result) {
-
                   assert(!is_cached_result);
 
                   // note: path is updated in the normal completion handler.
@@ -2115,10 +2188,9 @@ bool QueryDbMainLoop(Config* config,
                               const NonElidedVector<lsCompletionItem>& results,
                               bool is_cached_result) {
               auto msg = message->As<Ipc_TextDocumentSignatureHelp>();
-              auto ipc = IpcManager::instance();
 
-              Out_TextDocumentSignatureHelp response;
-              response.id = msg->id;
+              Out_TextDocumentSignatureHelp out;
+              out.id = msg->id;
 
               for (auto& result : results) {
                 if (result.label != search)
@@ -2131,25 +2203,24 @@ bool QueryDbMainLoop(Config* config,
                   ls_param.label = parameter;
                   signature.parameters.push_back(ls_param);
                 }
-                response.result.signatures.push_back(signature);
+                out.result.signatures.push_back(signature);
               }
 
               // Guess the signature the user wants based on available parameter
               // count.
-              response.result.activeSignature = 0;
-              for (size_t i = 0; i < response.result.signatures.size(); ++i) {
-                if (active_param < response.result.signatures.size()) {
-                  response.result.activeSignature = (int)i;
+              out.result.activeSignature = 0;
+              for (size_t i = 0; i < out.result.signatures.size(); ++i) {
+                if (active_param < out.result.signatures.size()) {
+                  out.result.activeSignature = (int)i;
                   break;
                 }
               }
 
               // Set signature to what we parsed from the working file.
-              response.result.activeParameter = active_param;
+              out.result.activeParameter = active_param;
 
               Timer timer;
-              ipc->SendOutMessageToClient(IpcId::TextDocumentSignatureHelp,
-                                          response);
+              IpcManager::WriteStdout(IpcId::TextDocumentSignatureHelp, out);
 
               if (!is_cached_result) {
                 signature_cache->WithLock([&]() {
@@ -2190,8 +2261,8 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_TextDocumentDefinition response;
-        response.id = msg->id;
+        Out_TextDocumentDefinition out;
+        out.id = msg->id;
 
         int target_line = msg->params.position.line + 1;
         int target_column = msg->params.position.character + 1;
@@ -2231,36 +2302,35 @@ bool QueryDbMainLoop(Config* config,
               optional<lsLocation> ls_declaration =
                   GetLsLocation(db, working_files, declaration);
               if (ls_declaration)
-                response.result.push_back(*ls_declaration);
+                out.result.push_back(*ls_declaration);
             }
             // We found some declarations. Break so we don't add the definition
             // location.
-            if (!response.result.empty())
+            if (!out.result.empty())
               break;
           }
 
           if (def_loc) {
-            PushBack(&response.result,
-                     GetLsLocation(db, working_files, *def_loc));
+            PushBack(&out.result, GetLsLocation(db, working_files, *def_loc));
           }
 
-          if (!response.result.empty())
+          if (!out.result.empty())
             break;
         }
 
         // No symbols - check for includes.
-        if (response.result.empty()) {
+        if (out.result.empty()) {
           for (const IndexInclude& include : file->def->includes) {
             if (include.line == target_line) {
               lsLocation result;
               result.uri = lsDocumentUri::FromPath(include.resolved_path);
-              response.result.push_back(result);
+              out.result.push_back(result);
               break;
             }
           }
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentDefinition, response);
+        IpcManager::WriteStdout(IpcId::TextDocumentDefinition, out);
         break;
       }
 
@@ -2276,14 +2346,14 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_TextDocumentDocumentHighlight response;
-        response.id = msg->id;
+        Out_TextDocumentDocumentHighlight out;
+        out.id = msg->id;
 
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
           // Found symbol. Return references to highlight.
           std::vector<QueryLocation> uses = GetUsesOfSymbol(db, ref.idx);
-          response.result.reserve(uses.size());
+          out.result.reserve(uses.size());
           for (const QueryLocation& use : uses) {
             if (use.path != file_id)
               continue;
@@ -2296,13 +2366,12 @@ bool QueryDbMainLoop(Config* config,
             lsDocumentHighlight highlight;
             highlight.kind = lsDocumentHighlightKind::Text;
             highlight.range = ls_location->range;
-            response.result.push_back(highlight);
+            out.result.push_back(highlight);
           }
           break;
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentDocumentHighlight,
-                                    response);
+        IpcManager::WriteStdout(IpcId::TextDocumentDocumentHighlight, out);
         break;
       }
 
@@ -2317,8 +2386,8 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_TextDocumentHover response;
-        response.id = msg->id;
+        Out_TextDocumentHover out;
+        out.id = msg->id;
 
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
@@ -2328,12 +2397,14 @@ bool QueryDbMainLoop(Config* config,
           if (!ls_range)
             continue;
 
-          response.result.contents = GetHoverForSymbol(db, ref.idx);
-          response.result.range = *ls_range;
+          out.result.contents.value = GetHoverForSymbol(db, ref.idx);
+          out.result.contents.language = file->def->language;
+
+          out.result.range = *ls_range;
           break;
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentHover, response);
+        IpcManager::WriteStdout(IpcId::TextDocumentHover, out);
         break;
       }
 
@@ -2348,8 +2419,8 @@ bool QueryDbMainLoop(Config* config,
         WorkingFile* working_file =
             working_files->GetFileByFilename(file->def->path);
 
-        Out_TextDocumentReferences response;
-        response.id = msg->id;
+        Out_TextDocumentReferences out;
+        out.id = msg->id;
 
         for (const SymbolRef& ref :
              FindSymbolsAtLocation(working_file, file, msg->params.position)) {
@@ -2361,7 +2432,7 @@ bool QueryDbMainLoop(Config* config,
 
           // Found symbol. Return references.
           std::vector<QueryLocation> uses = GetUsesOfSymbol(db, ref.idx);
-          response.result.reserve(uses.size());
+          out.result.reserve(uses.size());
           for (const QueryLocation& use : uses) {
             if (excluded_declaration.has_value() &&
                 use == *excluded_declaration)
@@ -2370,20 +2441,20 @@ bool QueryDbMainLoop(Config* config,
             optional<lsLocation> ls_location =
                 GetLsLocation(db, working_files, use);
             if (ls_location)
-              response.result.push_back(*ls_location);
+              out.result.push_back(*ls_location);
           }
           break;
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentReferences, response);
+        IpcManager::WriteStdout(IpcId::TextDocumentReferences, out);
         break;
       }
 
       case IpcId::TextDocumentDocumentSymbol: {
         auto msg = message->As<Ipc_TextDocumentDocumentSymbol>();
 
-        Out_TextDocumentDocumentSymbol response;
-        response.id = msg->id;
+        Out_TextDocumentDocumentSymbol out;
+        out.id = msg->id;
 
         QueryFile* file;
         if (!FindFileOrFail(db, msg->id, msg->params.textDocument.uri.GetPath(),
@@ -2401,19 +2472,18 @@ bool QueryDbMainLoop(Config* config,
           if (!location)
             continue;
           info->location = *location;
-          response.result.push_back(*info);
+          out.result.push_back(*info);
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentDocumentSymbol,
-                                    response);
+        IpcManager::WriteStdout(IpcId::TextDocumentDocumentSymbol, out);
         break;
       }
 
       case IpcId::TextDocumentDocumentLink: {
         auto msg = message->As<Ipc_TextDocumentDocumentLink>();
 
-        Out_TextDocumentDocumentLink response;
-        response.id = msg->id;
+        Out_TextDocumentDocumentLink out;
+        out.id = msg->id;
 
         if (config->showDocumentLinksOnIncludes) {
           QueryFile* file;
@@ -2446,11 +2516,11 @@ bool QueryDbMainLoop(Config* config,
             lsDocumentLink link;
             link.target = lsDocumentUri::FromPath(include.resolved_path);
             link.range = *between_quotes;
-            response.result.push_back(link);
+            out.result.push_back(link);
           }
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentDocumentLink, response);
+        IpcManager::WriteStdout(IpcId::TextDocumentDocumentLink, out);
         break;
       }
 
@@ -2482,8 +2552,8 @@ bool QueryDbMainLoop(Config* config,
           break;
         }
 
-        Out_TextDocumentCodeAction response;
-        response.id = msg->id;
+        Out_TextDocumentCodeAction out;
+        out.id = msg->id;
 
         // TODO: auto-insert namespace?
 
@@ -2549,7 +2619,7 @@ bool QueryDbMainLoop(Config* config,
               command.title = "Auto-Implement " + std::to_string(num_edits) +
                               " methods on " + type.def->short_name;
               command.command = "cquery._autoImplement";
-              response.result.push_back(command);
+              out.result.push_back(command);
               break;
             }
 
@@ -2577,7 +2647,7 @@ bool QueryDbMainLoop(Config* config,
               if (edit->range.start.line >= default_line)
                 edit->newText.insert(0, "\n");
               command.arguments.edits.push_back(*edit);
-              response.result.push_back(command);
+              out.result.push_back(command);
               break;
             }
             default:
@@ -2585,7 +2655,7 @@ bool QueryDbMainLoop(Config* config,
           }
 
           // Only show one auto-impl section.
-          if (!response.result.empty())
+          if (!out.result.empty())
             break;
         }
 
@@ -2674,7 +2744,7 @@ bool QueryDbMainLoop(Config* config,
                                 " includes to insert";
               command.command = "cquery._insertInclude";
               command.arguments.textDocumentUri = msg->params.textDocument.uri;
-              response.result.push_back(command);
+              out.result.push_back(command);
             }
           }
 
@@ -2687,19 +2757,19 @@ bool QueryDbMainLoop(Config* config,
             command.command = "cquery._applyFixIt";
             command.arguments.textDocumentUri = msg->params.textDocument.uri;
             command.arguments.edits = diag.fixits_;
-            response.result.push_back(command);
+            out.result.push_back(command);
           }
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentCodeAction, response);
+        IpcManager::WriteStdout(IpcId::TextDocumentCodeAction, out);
         break;
       }
 
       case IpcId::TextDocumentCodeLens: {
         auto msg = message->As<Ipc_TextDocumentCodeLens>();
 
-        Out_TextDocumentCodeLens response;
-        response.id = msg->id;
+        Out_TextDocumentCodeLens out;
+        out.id = msg->id;
 
         lsDocumentUri file_as_uri = msg->params.textDocument.uri;
         std::string path = file_as_uri.GetPath();
@@ -2712,7 +2782,7 @@ bool QueryDbMainLoop(Config* config,
           break;
 
         CommonCodeLensParams common;
-        common.result = &response.result;
+        common.result = &out.result;
         common.db = db;
         common.working_files = working_files;
         common.working_file = working_files->GetFileByFilename(file->def->path);
@@ -2796,7 +2866,7 @@ bool QueryDbMainLoop(Config* config,
                     code_lens.command->arguments.uri = ls_base->uri;
                     code_lens.command->arguments.position =
                         ls_base->range.start;
-                    response.result.push_back(code_lens);
+                    out.result.push_back(code_lens);
                   }
                 }
               }
@@ -2830,17 +2900,7 @@ bool QueryDbMainLoop(Config* config,
           };
         }
 
-        ipc->SendOutMessageToClient(IpcId::TextDocumentCodeLens, response);
-
-        // TODO: We need to move this to a separate request, as the user may
-        // have turned code lens off (ie, a custom DidView notification).
-        if (file && file->def) {
-          WorkingFile* working_file =
-              working_files->GetFileByFilename(file->def->path);
-          EmitInactiveLines(working_file, file->def->inactive_regions);
-          // Do not emit semantic highlighting information here, as it has not
-          // been updated.
-        }
+        IpcManager::WriteStdout(IpcId::TextDocumentCodeLens, out);
 
         break;
       }
@@ -2851,8 +2911,8 @@ bool QueryDbMainLoop(Config* config,
         // inspiration
         auto msg = message->As<Ipc_WorkspaceSymbol>();
 
-        Out_WorkspaceSymbol response;
-        response.id = msg->id;
+        Out_WorkspaceSymbol out;
+        out.id = msg->id;
 
         LOG_S(INFO) << "[querydb] Considering " << db->detailed_names.size()
                     << " candidates for query " << msg->params.query;
@@ -2869,13 +2929,13 @@ bool QueryDbMainLoop(Config* config,
               continue;
 
             InsertSymbolIntoResult(db, working_files, db->symbols[i],
-                                   &response.result);
-            if (response.result.size() >= config->maxWorkspaceSearchResults)
+                                   &out.result);
+            if (out.result.size() >= config->maxWorkspaceSearchResults)
               break;
           }
         }
 
-        if (response.result.size() < config->maxWorkspaceSearchResults) {
+        if (out.result.size() < config->maxWorkspaceSearchResults) {
           for (int i = 0; i < db->detailed_names.size(); ++i) {
             if (SubstringMatch(query, db->detailed_names[i])) {
               // Do not show the same entry twice.
@@ -2883,16 +2943,16 @@ bool QueryDbMainLoop(Config* config,
                 continue;
 
               InsertSymbolIntoResult(db, working_files, db->symbols[i],
-                                     &response.result);
-              if (response.result.size() >= config->maxWorkspaceSearchResults)
+                                     &out.result);
+              if (out.result.size() >= config->maxWorkspaceSearchResults)
                 break;
             }
           }
         }
 
-        LOG_S(INFO) << "[querydb] Found " << response.result.size()
+        LOG_S(INFO) << "[querydb] Found " << out.result.size()
                     << " results for query " << query;
-        ipc->SendOutMessageToClient(IpcId::WorkspaceSymbol, response);
+        IpcManager::WriteStdout(IpcId::WorkspaceSymbol, out);
         break;
       }
 
@@ -2912,7 +2972,7 @@ bool QueryDbMainLoop(Config* config,
           has_work |= import_manager->HasActiveQuerydbImports();
           has_work |= queue->HasWork();
           has_work |= QueryDb_ImportMain(config, db, import_manager, queue,
-                                         working_files);
+                                         semantic_cache, working_files);
           if (!has_work)
             ++idle_count;
           else
@@ -2944,8 +3004,10 @@ bool QueryDbMainLoop(Config* config,
   // TODO: consider rate-limiting and checking for IPC messages so we don't
   // block requests / we can serve partial requests.
 
-  if (QueryDb_ImportMain(config, db, import_manager, queue, working_files))
+  if (QueryDb_ImportMain(config, db, import_manager, queue, semantic_cache,
+                         working_files)) {
     did_work = true;
+  }
 
   return did_work;
 }
@@ -2956,6 +3018,7 @@ void RunQueryDbThread(const std::string& bin_name,
                       QueueManager* queue) {
   bool exit_when_idle = false;
   Project project;
+  SemanticHighlightSymbolCache semantic_cache;
   WorkingFiles working_files;
   FileConsumer::SharedState file_consumer_shared;
 
@@ -2981,7 +3044,7 @@ void RunQueryDbThread(const std::string& bin_name,
     bool did_work = QueryDbMainLoop(
         config, &db, &exit_when_idle, waiter, queue, &project,
         &file_consumer_shared, &import_manager, &timestamp_manager,
-        &working_files, &clang_complete, &include_complete,
+        &semantic_cache, &working_files, &clang_complete, &include_complete,
         global_code_complete_cache.get(), non_global_code_complete_cache.get(),
         signature_cache.get());
 
@@ -2995,8 +3058,8 @@ void RunQueryDbThread(const std::string& bin_name,
     FreeUnusedMemory();
 
     if (!did_work) {
-      waiter->Wait({IpcManager::instance()->threaded_queue_for_server_.get(),
-                    &queue->do_id_map, &queue->on_indexed});
+      waiter->Wait({&IpcManager::instance()->for_querydb, &queue->do_id_map,
+                    &queue->on_indexed});
     }
   }
 }
@@ -3039,8 +3102,6 @@ void LaunchStdinLoop(Config* config,
 
     (*request_times)[message->method_id] = Timer();
 
-    // std::cerr << "[stdin] Got message " << IpcIdToString(message->method_id)
-    // << std::endl;
     switch (message->method_id) {
       case IpcId::Initialized: {
         // TODO: don't send output until we get this notification
@@ -3063,12 +3124,13 @@ void LaunchStdinLoop(Config* config,
         // loop to exit the thread. If we keep parsing input stdin is likely
         // closed so cquery will exit.
         LOG_S(INFO) << "cquery will exit when all threads are idle";
-        ipc->SendMessage(IpcManager::Destination::Server, std::move(message));
+        ipc->for_querydb.Enqueue(std::move(message));
         return WorkThread::Result::ExitThread;
       }
 
       case IpcId::Initialize:
       case IpcId::TextDocumentDidOpen:
+      case IpcId::CqueryTextDocumentDidView:
       case IpcId::TextDocumentDidChange:
       case IpcId::TextDocumentDidClose:
       case IpcId::TextDocumentDidSave:
@@ -3094,7 +3156,7 @@ void LaunchStdinLoop(Config* config,
       case IpcId::CqueryDerived:
       case IpcId::CqueryIndexFile:
       case IpcId::CqueryQueryDbWaitForIdleIndexer: {
-        ipc->SendMessage(IpcManager::Destination::Server, std::move(message));
+        ipc->for_querydb.Enqueue(std::move(message));
         break;
       }
 
@@ -3115,45 +3177,32 @@ void LaunchStdoutThread(std::unordered_map<IpcId, Timer>* request_times,
   WorkThread::StartThread("stdout", [=]() {
     IpcManager* ipc = IpcManager::instance();
 
-    std::vector<std::unique_ptr<BaseIpcMessage>> messages =
-        ipc->GetMessages(IpcManager::Destination::Client);
+    std::vector<IpcManager::StdoutMessage> messages =
+        ipc->for_stdout.DequeueAll();
     if (messages.empty()) {
-      waiter->Wait({ipc->threaded_queue_for_client_.get()});
+      waiter->Wait({&ipc->for_stdout});
       return queue->HasWork() ? WorkThread::Result::MoreWork
                               : WorkThread::Result::NoWork;
     }
 
     for (auto& message : messages) {
-      // std::cerr << "[stdout] Processing message " <<
-      // IpcIdToString(message->method_id) << std::endl;
-
-      switch (message->method_id) {
-        case IpcId::Cout: {
-          auto msg = message->As<Ipc_Cout>();
-
-          if (ShouldDisplayIpcTiming(msg->original_ipc_id)) {
-            Timer time = (*request_times)[msg->original_ipc_id];
-            time.ResetAndPrint("[e2e] Running " + std::string(IpcIdToString(
-                                                      msg->original_ipc_id)));
-          }
-
-          if (g_log_stdin_stdout_to_stderr) {
-            std::string printed = "[COUT] |" + msg->content + "|\n";
-            std::cerr << printed;
-            std::cerr.flush();
-          }
-
-          std::cout << msg->content;
-          std::cout.flush();
-          break;
-        }
-
-        default: {
-          LOG_S(FATAL) << "Exiting; unhandled IPC message "
-                       << IpcIdToString(message->method_id);
-          exit(1);
-        }
+      if (ShouldDisplayIpcTiming(message.id)) {
+        Timer time = (*request_times)[message.id];
+        time.ResetAndPrint("[e2e] Running " +
+                           std::string(IpcIdToString(message.id)));
       }
+
+      if (g_log_stdin_stdout_to_stderr) {
+        std::ostringstream sstream;
+        sstream << "[COUT] |";
+        sstream << message.content;
+        sstream << "|\n";
+        std::cerr << sstream.str();
+        std::cerr.flush();
+      }
+
+      std::cout << message.content;
+      std::cout.flush();
     }
 
     return WorkThread::Result::MoreWork;
@@ -3220,6 +3269,11 @@ int main(int argc, char** argv) {
 
   bool print_help = true;
 
+  if (HasOption(options, "--clang-sanity-check")) {
+    print_help = false;
+    ClangSanityCheck();
+  }
+
   if (HasOption(options, "--log-stdin-stdout-to-stderr"))
     g_log_stdin_stdout_to_stderr = true;
 
@@ -3265,6 +3319,9 @@ int main(int argc, char** argv) {
                   Print stdin and stdout messages to stderr. This is a aid for
                   developing new language clients, as it makes it easier to
                   figure out how the client is interacting with cquery.
+    --clang-sanity-check
+                  Run a simple index test. Verifies basic clang functionality.
+                  Needs to be executed from the cquery root checkout directory.
 
   Configuration:
     When opening up a directory, cquery will look for a compile_commands.json

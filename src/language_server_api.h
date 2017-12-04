@@ -969,7 +969,7 @@ struct Ipc_CancelRequest : public IpcMessage<Ipc_CancelRequest> {
 };
 MAKE_REFLECT_STRUCT(Ipc_CancelRequest, id);
 
-// Open, update, close file
+// Open, view, change, close file
 struct Ipc_TextDocumentDidOpen : public IpcMessage<Ipc_TextDocumentDidOpen> {
   struct Params {
     lsTextDocumentItem textDocument;
@@ -980,6 +980,17 @@ struct Ipc_TextDocumentDidOpen : public IpcMessage<Ipc_TextDocumentDidOpen> {
 };
 MAKE_REFLECT_STRUCT(Ipc_TextDocumentDidOpen::Params, textDocument);
 MAKE_REFLECT_STRUCT(Ipc_TextDocumentDidOpen, params);
+struct Ipc_CqueryTextDocumentDidView
+    : public IpcMessage<Ipc_CqueryTextDocumentDidView> {
+  struct Params {
+    lsDocumentUri textDocumentUri;
+  };
+
+  const static IpcId kIpcId = IpcId::CqueryTextDocumentDidView;
+  Params params;
+};
+MAKE_REFLECT_STRUCT(Ipc_CqueryTextDocumentDidView::Params, textDocumentUri);
+MAKE_REFLECT_STRUCT(Ipc_CqueryTextDocumentDidView, params);
 struct Ipc_TextDocumentDidChange
     : public IpcMessage<Ipc_TextDocumentDidChange> {
   struct lsTextDocumentContentChangeEvent {
@@ -1179,6 +1190,26 @@ MAKE_REFLECT_STRUCT(lsSignatureHelp,
                     signatures,
                     activeSignature,
                     activeParameter);
+
+// MarkedString can be used to render human readable text. It is either a
+// markdown string or a code-block that provides a language and a code snippet.
+// The language identifier is sematically equal to the optional language
+// identifier in fenced code blocks in GitHub issues. See
+// https://help.github.com/articles/creating-and-highlighting-code-blocks/#syntax-highlighting
+//
+// The pair of a language and a value is an equivalent to markdown:
+// ```${language}
+// ${value}
+// ```
+//
+// Note that markdown strings will be sanitized - that means html will be
+// escaped.
+struct lsMarkedString {
+  std::string language;
+  std::string value;
+};
+MAKE_REFLECT_STRUCT(lsMarkedString, language, value);
+
 struct Out_TextDocumentSignatureHelp
     : public lsOutMessage<Out_TextDocumentSignatureHelp> {
   lsRequestId id;
@@ -1228,7 +1259,7 @@ struct Ipc_TextDocumentHover : public IpcMessage<Ipc_TextDocumentHover> {
 MAKE_REFLECT_STRUCT(Ipc_TextDocumentHover, id, params);
 struct Out_TextDocumentHover : public lsOutMessage<Out_TextDocumentHover> {
   struct Result {
-    std::string contents;
+    lsMarkedString contents;
     optional<lsRange> range;
   };
 
@@ -1486,8 +1517,9 @@ struct Out_CqueryPublishSemanticHighlighting
     : public lsOutMessage<Out_CqueryPublishSemanticHighlighting> {
   enum class SymbolType { Type = 0, Function, Variable };
   struct Symbol {
+    int stableId = 0;
     SymbolType type = SymbolType::Type;
-    bool is_type_member = false;
+    bool isTypeMember = false;
     NonElidedVector<lsRange> ranges;
   };
   struct Params {
@@ -1500,7 +1532,8 @@ struct Out_CqueryPublishSemanticHighlighting
 MAKE_REFLECT_TYPE_PROXY(Out_CqueryPublishSemanticHighlighting::SymbolType, int);
 MAKE_REFLECT_STRUCT(Out_CqueryPublishSemanticHighlighting::Symbol,
                     type,
-                    is_type_member,
+                    isTypeMember,
+                    stableId,
                     ranges);
 MAKE_REFLECT_STRUCT(Out_CqueryPublishSemanticHighlighting::Params,
                     uri,

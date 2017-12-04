@@ -445,7 +445,6 @@ std::string IndexFile::ToString() {
 IndexType::IndexType(IndexTypeId id, const std::string& usr)
     : def(usr), id(id) {
   assert(usr.size() > 0);
-  // std::cerr << "Creating type with usr " << usr << std::endl;
 }
 
 void RemoveItem(std::vector<Range>& ranges, Range to_remove) {
@@ -472,13 +471,9 @@ bool Contains(const std::vector<T>& vec, const T& element) {
   return false;
 }
 
-int abortQuery(CXClientData client_data, void* reserved) {
-  // 0 -> continue
-  return 0;
-}
-void diagnostic(CXClientData client_data,
-                CXDiagnosticSet diagnostics,
-                void* reserved) {
+void OnIndexDiagnostic(CXClientData client_data,
+                       CXDiagnosticSet diagnostics,
+                       void* reserved) {
   IndexParam* param = static_cast<IndexParam*>(client_data);
 
   for (unsigned i = 0; i < clang_getNumDiagnosticsInSet(diagnostics); ++i) {
@@ -505,14 +500,8 @@ void diagnostic(CXClientData client_data,
   }
 }
 
-CXIdxClientFile enteredMainFile(CXClientData client_data,
-                                CXFile mainFile,
-                                void* reserved) {
-  return nullptr;
-}
-
-CXIdxClientFile ppIncludedFile(CXClientData client_data,
-                               const CXIdxIncludedFileInfo* file) {
+CXIdxClientFile OnIndexIncludedFile(CXClientData client_data,
+                                    const CXIdxIncludedFileInfo* file) {
   IndexParam* param = static_cast<IndexParam*>(client_data);
 
   // file->hashLoc only has the position of the hash. We don't have the full
@@ -531,16 +520,6 @@ CXIdxClientFile ppIncludedFile(CXClientData client_data,
   include.resolved_path = FileName(file->file);
   db->includes.push_back(include);
 
-  return nullptr;
-}
-
-CXIdxClientASTFile importedASTFile(CXClientData client_data,
-                                   const CXIdxImportedASTFileInfo*) {
-  return nullptr;
-}
-
-CXIdxClientContainer startedTranslationUnit(CXClientData client_data,
-                                            void* reserved) {
   return nullptr;
 }
 
@@ -719,10 +698,6 @@ optional<IndexTypeId> AddDeclTypeUsages(
     ClangCursor decl_cursor,
     const CXIdxContainerInfo* semantic_container,
     const CXIdxContainerInfo* lexical_container) {
-  // std::cerr << std::endl << "AddDeclUsages " << decl_cursor.get_spelling() <<
-  // std::endl;
-  // Dump(decl_cursor);
-
   //
   // The general AST format for definitions follows this pattern:
   //
@@ -813,13 +788,9 @@ optional<IndexTypeId> AddDeclTypeUsages(
     //  Foo::Foo() {}
     //
     if (!decl_cursor.is_definition()) {
-      // TODO: I don't think this resolution ever works.
       ClangCursor def = decl_cursor.get_definition();
-      if (def.get_kind() != CXCursor_FirstInvalid) {
-        std::cerr << "Successful resolution of decl usage to definition"
-                  << std::endl;
+      if (def.get_kind() != CXCursor_FirstInvalid)
         decl_cursor = def;
-      }
     }
     process_last_type_ref = false;
   }
@@ -892,8 +863,6 @@ ClangCursor::VisitResult AddDeclInitializerUsagesVisitor(ClangCursor cursor,
         break;
 
       Range loc = ResolveSpelling(cursor.cx_cursor);
-      // std::cerr << "Adding usage to id=" << ref_id.id << " usr=" << ref_usr
-      // << " at " << loc.ToString() << std::endl;
       IndexVarId ref_id = db->ToVarId(ref_usr);
       IndexVar* ref_def = db->Resolve(ref_id);
       UniqueAdd(ref_def->uses, loc);
@@ -972,7 +941,7 @@ ClangCursor::VisitResult VisitMacroDefinitionAndExpansions(ClangCursor cursor,
   return ClangCursor::VisitResult::Continue;
 }
 
-void indexDeclaration(CXClientData client_data, const CXIdxDeclInfo* decl) {
+void OnIndexDeclaration(CXClientData client_data, const CXIdxDeclInfo* decl) {
   if (!kIndexStdDeclarations &&
       clang_Location_isInSystemHeader(
           clang_indexLoc_getCXSourceLocation(decl->loc)))
@@ -995,11 +964,26 @@ void indexDeclaration(CXClientData client_data, const CXIdxDeclInfo* decl) {
   if (!db)
     return;
 
-  NamespaceHelper* ns = &param->ns;
+  // The language of this declaration
+  LanguageId decl_lang = [decl]() {
+    switch (clang_getCursorLanguage(decl->cursor)) {
+      case CXLanguage_C:
+        return LanguageId::C;
+      case CXLanguage_CPlusPlus:
+        return LanguageId::Cpp;
+      case CXLanguage_ObjC:
+        return LanguageId::ObjC;
+      default:
+        return LanguageId::Unknown;
+    };
+  }();
 
-  // std::cerr << "DECL kind=" << decl->entityInfo->kind << " at " <<
-  // db->id_cache.Resolve(decl->cursor, false).ToPrettyString(&db->id_cache) <<
-  // std::endl;
+  // Only update the file language if the new language is "greater" than the old
+  if (decl_lang > db->language) {
+    db->language = decl_lang;
+  }
+
+  NamespaceHelper* ns = &param->ns;
 
   switch (decl->entityInfo->kind) {
     case CXIdxEntity_CXXNamespace: {
@@ -1052,9 +1036,6 @@ void indexDeclaration(CXClientData client_data, const CXIdxDeclInfo* decl) {
         var->def.declaration = ResolveSpelling(decl->cursor);
       }
       UniqueAdd(var->uses, decl_loc_spelling);
-
-      // std::cerr << std::endl << "Visiting declaration" << std::endl;
-      // Dump(decl_cursor);
 
       AddDeclInitializerUsages(db, decl_cursor);
       var = db->Resolve(var_id);
@@ -1169,6 +1150,11 @@ void indexDeclaration(CXClientData client_data, const CXIdxDeclInfo* decl) {
       if (!is_template_specialization) {
         func->def.short_name = decl->entityInfo->name;
 
+        // Set the |is_operator| flag to true if the function name starts with
+        // "operator"
+        func->def.is_operator =
+            func->def.short_name.compare(0, 8, "operator") == 0;
+
         // Build detailed name. The type desc looks like void (void *). We
         // insert the qualified name before the first '('.
         std::string qualified_name =
@@ -1209,9 +1195,10 @@ void indexDeclaration(CXClientData client_data, const CXIdxDeclInfo* decl) {
 
           // FIXME: this happens for destructors when there are multiple
           // parent classes.
-          if (num_overridden > 1)
+          if (num_overridden > 1) {
             std::cerr << "[indexer]: warning: multiple base overrides for "
                       << func->def.detailed_name << std::endl;
+          }
 
           for (unsigned i = 0; i < num_overridden; ++i) {
             ClangCursor parent = overridden[i];
@@ -1364,22 +1351,13 @@ bool IsFunctionCallContext(CXCursorKind kind) {
   return false;
 }
 
-void indexEntityReference(CXClientData client_data,
-                          const CXIdxEntityRefInfo* ref) {
+void OnIndexReference(CXClientData client_data, const CXIdxEntityRefInfo* ref) {
   // Don't index references from or to system headers.
   if (clang_Location_isInSystemHeader(
           clang_indexLoc_getCXSourceLocation(ref->loc)) ||
       clang_Location_isInSystemHeader(
           clang_getCursorLocation(ref->referencedEntity->cursor)))
     return;
-
-  // assert(AreEqualLocations(ref->loc, ref->cursor));
-
-  //  if (clang_Location_isInSystemHeader(clang_getCursorLocation(ref->cursor))
-  //  ||
-  //      clang_Location_isInSystemHeader(
-  //          clang_getCursorLocation(ref->referencedEntity->cursor)))
-  //    return;
 
   // TODO: Use clang_getFileUniqueID
   CXFile file;
@@ -1389,22 +1367,6 @@ void indexEntityReference(CXClientData client_data,
   IndexFile* db = ConsumeFile(param, file);
   if (!db)
     return;
-
-  // ref->cursor mainFile=0
-  // ref->loc mainFile=1
-  // ref->referencedEntity mainFile=1
-  //
-  // Regardless, we need to do more advanced location processing to handle
-  // multiple output IndexFile instances.
-  // bool mainFile =
-  // clang_Location_isFromMainFile(clang_indexLoc_getCXSourceLocation(ref->loc));
-  // Range loc_spelling = param->db->id_cache.ForceResolveSpelling(ref->cursor,
-  // false /*interesting*/);  std::cerr << "mainFile: " << mainFile << ", loc: "
-  // << loc_spelling.ToString() << std::endl;
-
-  // Don't index references that are not from the main file.
-  // if (!clang_Location_isFromMainFile(clang_getCursorLocation(ref->cursor)))
-  //  return;
 
   ClangCursor cursor(ref->cursor);
 
@@ -1634,10 +1596,17 @@ std::vector<std::unique_ptr<IndexFile>> ParseWithTu(
     const std::vector<CXUnsavedFile>& file_contents) {
   Timer timer;
 
-  IndexerCallbacks callbacks[] = {{&abortQuery, &diagnostic, &enteredMainFile,
-                                   &ppIncludedFile, &importedASTFile,
-                                   &startedTranslationUnit, &indexDeclaration,
-                                   &indexEntityReference}};
+  IndexerCallbacks callback = {0};
+  // Available callbacks:
+  // - abortQuery
+  // - enteredMainFile
+  // - ppIncludedFile
+  // - importedASTFile
+  // - startedTranslationUnit
+  callback.diagnostic = &OnIndexDiagnostic;
+  callback.ppIncludedFile = &OnIndexIncludedFile;
+  callback.indexDeclaration = &OnIndexDeclaration;
+  callback.indexEntityReference = &OnIndexReference;
 
   FileConsumer file_consumer(file_consumer_shared, file);
   IndexParam param(tu, &file_consumer);
@@ -1649,16 +1618,27 @@ std::vector<std::unique_ptr<IndexFile>> ParseWithTu(
   CXFile cx_file = clang_getFile(tu->cx_tu, file.c_str());
   param.primary_file = ConsumeFile(&param, cx_file);
 
-  // std::cerr << "!! [START] Indexing " << file << std::endl;
   CXIndexAction index_action = clang_IndexAction_create(index->cx_index);
-  clang_indexTranslationUnit(index_action, &param, callbacks, sizeof(callbacks),
-                             CXIndexOpt_IndexFunctionLocalSymbols |
-                                 CXIndexOpt_SkipParsedBodiesInSession |
-                                 CXIndexOpt_IndexImplicitTemplateInstantiations,
-                             tu->cx_tu);
+
+  // NOTE: libclang re-enables crash recovery whenever a new index is created.
+  // To have clang crash toggle crash recovery right before calling
+  // clang_indexTranslationUnit.
+  // clang_toggleCrashRecovery(0);
+
+  // |index_result| is a CXErrorCode instance.
+  int index_result = clang_indexTranslationUnit(
+      index_action, &param, &callback, sizeof(IndexerCallbacks),
+      CXIndexOpt_IndexFunctionLocalSymbols |
+          CXIndexOpt_SkipParsedBodiesInSession |
+          CXIndexOpt_IndexImplicitTemplateInstantiations,
+      tu->cx_tu);
+  if (index_result != CXError_Success) {
+    LOG_S(WARNING) << "Indexing " << file
+                   << " failed with errno=" << index_result;
+    return {};
+  }
 
   clang_IndexAction_dispose(index_action);
-  // std::cerr << "!! [END] Indexing " << file << std::endl;
 
   ClangCursor(clang_getTranslationUnitCursor(tu->cx_tu))
       .VisitChildren(&VisitMacroDefinitionAndExpansions, &param);
@@ -1693,4 +1673,54 @@ std::vector<std::unique_ptr<IndexFile>> ParseWithTu(
 void IndexInit() {
   clang_enableStackTraces();
   clang_toggleCrashRecovery(1);
+}
+
+void ClangSanityCheck() {
+  std::vector<const char*> args = {"clang", "tests/vars/class_member.cc"};
+  unsigned opts = 0;
+  CXIndex index = clang_createIndex(0, 1);
+  CXTranslationUnit tu;
+  clang_parseTranslationUnit2FullArgv(index, nullptr, args.data(), args.size(),
+                                      nullptr, 0, opts, &tu);
+  assert(tu);
+
+  IndexerCallbacks callback = {0};
+  callback.abortQuery = [](CXClientData client_data, void* reserved) {
+    return 0;
+  };
+  callback.diagnostic = [](CXClientData client_data,
+                           CXDiagnosticSet diagnostics, void* reserved) {};
+  callback.enteredMainFile = [](CXClientData client_data, CXFile mainFile,
+                                void* reserved) -> CXIdxClientFile {
+    return nullptr;
+  };
+  callback.ppIncludedFile =
+      [](CXClientData client_data,
+         const CXIdxIncludedFileInfo* file) -> CXIdxClientFile {
+    return nullptr;
+  };
+  callback.importedASTFile =
+      [](CXClientData client_data,
+         const CXIdxImportedASTFileInfo*) -> CXIdxClientASTFile {
+    return nullptr;
+  };
+  callback.startedTranslationUnit = [](CXClientData client_data,
+                                       void* reserved) -> CXIdxClientContainer {
+    return nullptr;
+  };
+  callback.indexDeclaration = [](CXClientData client_data,
+                                 const CXIdxDeclInfo* decl) {};
+  callback.indexEntityReference = [](CXClientData client_data,
+                                     const CXIdxEntityRefInfo* ref) {};
+
+  const unsigned kIndexOpts = 0;
+  CXIndexAction index_action = clang_IndexAction_create(index);
+  int index_param = 0;
+  clang_toggleCrashRecovery(0);
+  clang_indexTranslationUnit(index_action, &index_param, &callback,
+                             sizeof(IndexerCallbacks), kIndexOpts, tu);
+  clang_IndexAction_dispose(index_action);
+
+  clang_disposeTranslationUnit(tu);
+  clang_disposeIndex(index);
 }

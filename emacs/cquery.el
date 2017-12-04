@@ -166,7 +166,7 @@
             (cquery--clear-sem-highlights)
             (dolist (symbol symbols)
               (let* ((type (gethash "type" symbol))
-                     (is-type-member (gethash "is_type_member" symbol))
+                     (is-type-member (gethash "isTypeMember" symbol))
                      (ranges (mapcar 'cquery--read-range (gethash "ranges" symbol)))
                      (face
                       (pcase type
@@ -362,24 +362,26 @@
 ;;  Register lsp client
 ;; ---------------------------------------------------------------------
 
-(defun cquery--render-string (str)
-  (condition-case nil
-      (with-temp-buffer
-        (delay-mode-hooks (c++-mode))
-        (insert str)
-        (font-lock-ensure)
-        (buffer-string))
-    (error str)))
+(defun cquery--make-renderer (mode)
+  `(lambda (str)
+     (with-temp-buffer
+       (delay-mode-hooks (,(intern (format "%s-mode" mode))))
+       (insert str)
+       (font-lock-ensure)
+       (buffer-string))))
 
 (defun cquery--initialize-client (client)
   (dolist (p cquery--handlers)
     (lsp-client-on-notification client (car p) (cdr p)))
-  (lsp-provide-marked-string-renderer client "c++" #'cquery--render-string))
+  (lsp-provide-marked-string-renderer client "c" (cquery--make-renderer "c"))
+  (lsp-provide-marked-string-renderer client "cpp" (cquery--make-renderer "c++"))
+  (lsp-provide-marked-string-renderer client "objectivec" (cquery--make-renderer "objc")))
 
 (defun cquery--get-init-params (workspace)
   (let ((json-false :json-false))
-    (list :cacheDirectory (concat (lsp--workspace-root workspace) cquery-cache-dir)
-          :resourceDirectory cquery-resource-dir
+    (list :cacheDirectory (file-name-as-directory
+                           (expand-file-name cquery-cache-dir (lsp--workspace-root workspace)))
+          :resourceDirectory (expand-file-name cquery-resource-dir)
           :indexerCount cquery-indexer-count
           :enableProgressReports json-false))) ; TODO: prog reports for modeline
 
@@ -390,19 +392,10 @@
                         (user-error "Could not find cquery project root"))))
 
 (lsp-define-stdio-client
- lsp-cquery "c++" #'cquery--get-root
+ lsp-cquery "cpp" #'cquery--get-root
  (list cquery-executable "--language-server")
  :initialize #'cquery--initialize-client
  :extra-init-params #'cquery--get-init-params)
-
-;; ---------------------------------------------------------------------
-;;  lsp-mode function advices
-;; ---------------------------------------------------------------------
-
-;; For some reason this function just adds code actions in lsp-mode. We need to
-;; clear the old ones
-(advice-add 'lsp--text-document-code-action-callback :around
-            '(lambda (orig actions) (setq lsp-code-actions actions)))
 
 (provide 'cquery)
 ;;; cquery.el ends here

@@ -52,10 +52,15 @@ static std::vector<std::string> kBlacklistMulti = {
 
 // Blacklisted flags which are always removed from the command line.
 static std::vector<std::string> kBlacklist = {
-    "-c", "-MP", "-MD", "-MMD", "--fcolor-diagnostics",
+    "-c",
+    "-MP",
+    "-MD",
+    "-MMD",
+    "--fcolor-diagnostics",
 
     // This strips path-like args but is a bit hacky.
-    "/", "..",
+    "/",
+    "..",
 };
 
 // Arguments which are followed by a potentially relative path. We need to make
@@ -63,7 +68,7 @@ static std::vector<std::string> kBlacklist = {
 static std::vector<std::string> kPathArgs = {
     "-I",        "-iquote",        "-isystem",     "--sysroot=",
     "-isysroot", "-gcc-toolchain", "-include-pch", "-iframework",
-    "-F",        "-imacros"};
+    "-F",        "-imacros",       "-include"};
 
 // Arguments whose path arguments should be injected into include dir lookup
 // for #include completion.
@@ -86,6 +91,15 @@ bool IsCFile(const std::string& path) {
 Project::Entry GetCompilationEntryFromCompileCommandEntry(
     ProjectConfig* config,
     const CompileCommandsEntry& entry) {
+  auto cleanup_maybe_relative_path = [&](const std::string& path) {
+    // TODO/FIXME: Normalization will fail for paths that do not exist. Should
+    // it return an optional<std::string>?
+    assert(!path.empty());
+    if (path[0] == '/' || entry.directory.empty())
+      return NormalizePathWithTestOptOut(path);
+    return NormalizePathWithTestOptOut(entry.directory + "/" + path);
+  };
+
   Project::Entry result;
   result.filename = NormalizePathWithTestOptOut(entry.file);
 
@@ -107,15 +121,6 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   result.args.reserve(entry.args.size() + config->extra_flags.size());
   for (; i < entry.args.size(); ++i) {
     std::string arg = entry.args[i];
-
-    auto cleanup_maybe_relative_path = [&](const std::string& path) {
-      // TODO/FIXME: Normalization will fail for paths that do not exist. Should
-      // it return an optional<std::string>?
-      assert(!path.empty());
-      if (path[0] == '/' || entry.directory.empty())
-        return NormalizePathWithTestOptOut(path);
-      return NormalizePathWithTestOptOut(entry.directory + "/" + path);
-    };
 
     // Do not include path.
     if (result.filename == cleanup_maybe_relative_path(arg))
@@ -194,6 +199,11 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   if (!AnyStartsWith(result.args, "-resource-dir"))
     result.args.push_back("-resource-dir=" + config->resource_dir);
 
+  // There could be a clang version mismatch between what the project uses and
+  // what cquery uses. Make sure we do not emit warnings for mismatched options.
+  if (!AnyStartsWith(result.args, "-Wno-unknown-warning-option"))
+    result.args.push_back("-Wno-unknown-warning-option");
+
   return result;
 }
 
@@ -202,8 +212,9 @@ std::vector<Project::Entry> LoadFromDirectoryListing(ProjectConfig* config) {
 
   std::vector<std::string> args;
   std::cerr << "Using arguments: ";
-  for (const std::string& line :
-       ReadLines(config->project_dir + "/.cquery")) {
+  for (std::string line :
+       ReadLinesWithEnding(config->project_dir + "/.cquery")) {
+    Trim(line);
     if (line.empty() || StartsWith(line, "#"))
       continue;
     if (!args.empty())
@@ -232,17 +243,16 @@ std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
     ProjectConfig* config,
     const std::string& opt_compilation_db_dir) {
   // Try to load compile_commands.json, but fallback to a project listing.
-  const auto& compilation_db_dir  = opt_compilation_db_dir.empty()
-                                    ? config->project_dir
-                                    : opt_compilation_db_dir;
+  const auto& compilation_db_dir = opt_compilation_db_dir.empty()
+                                       ? config->project_dir
+                                       : opt_compilation_db_dir;
   LOG_S(INFO) << "Trying to load compile_commands.json";
   CXCompilationDatabase_Error cx_db_load_error;
   CXCompilationDatabase cx_db = clang_CompilationDatabase_fromDirectory(
       compilation_db_dir.c_str(), &cx_db_load_error);
   if (cx_db_load_error == CXCompilationDatabase_CanNotLoadDatabase) {
     LOG_S(INFO) << "Unable to load compile_commands.json located at \""
-                << compilation_db_dir
-                << "\"; using directory listing instead.";
+                << compilation_db_dir << "\"; using directory listing instead.";
     return LoadFromDirectoryListing(config);
   }
 
@@ -351,8 +361,8 @@ void Project::Load(const std::vector<std::string>& extra_flags,
   config.extra_flags = extra_flags;
   config.project_dir = root_directory;
   config.resource_dir = resource_directory;
-  entries = LoadCompilationEntriesFromDirectory(&config,
-                                                opt_compilation_db_dir);
+  entries =
+      LoadCompilationEntriesFromDirectory(&config, opt_compilation_db_dir);
 
   // Cleanup / postprocess include directories.
   quote_include_directories.assign(config.quote_dirs.begin(),
@@ -464,15 +474,18 @@ TEST_SUITE("Project") {
     CheckFlags(
         /* raw */ {"clang", "-lstdc++", "myfile.cc"},
         /* expected */ {"clang", "-lstdc++", "myfile.cc", "-xc++", "-std=c++11",
-                        "-resource-dir=/w/resource_dir/"});
+                        "-resource-dir=/w/resource_dir/",
+                        "-Wno-unknown-warning-option"});
 
     CheckFlags(/* raw */ {"goma", "clang"},
                /* expected */ {"clang", "-xc++", "-std=c++11",
-                               "-resource-dir=/w/resource_dir/"});
+                               "-resource-dir=/w/resource_dir/",
+                               "-Wno-unknown-warning-option"});
 
     CheckFlags(/* raw */ {"goma", "clang", "--foo"},
                /* expected */ {"clang", "--foo", "-xc++", "-std=c++11",
-                               "-resource-dir=/w/resource_dir/"});
+                               "-resource-dir=/w/resource_dir/",
+                               "-Wno-unknown-warning-option"});
   }
 
   // FIXME: Fix this test.
@@ -481,7 +494,8 @@ TEST_SUITE("Project") {
         "/home/user", "/home/user/foo/bar.c",
         /* raw */ {"cc", "-O0", "foo/bar.c"},
         /* expected */
-        {"cc", "-O0", "-xc", "-std=c11", "-resource-dir=/w/resource_dir/"});
+        {"cc", "-O0", "-xc", "-std=c11", "-resource-dir=/w/resource_dir/",
+         "-Wno-unknown-warning-option"});
   }
 
   // Checks flag parsing for a random chromium file in comparison to what
@@ -826,7 +840,8 @@ TEST_SUITE("Project") {
          "-fno-exceptions",
          "-fvisibility-inlines-hidden",
          "-xc++",
-         "-resource-dir=/w/resource_dir/"});
+         "-resource-dir=/w/resource_dir/",
+         "-Wno-unknown-warning-option"});
   }
 
   // Checks flag parsing for an example chromium file.
@@ -1145,7 +1160,8 @@ TEST_SUITE("Project") {
          "-fno-exceptions",
          "-fvisibility-inlines-hidden",
          "-xc++",
-         "-resource-dir=/w/resource_dir/"});
+         "-resource-dir=/w/resource_dir/",
+         "-Wno-unknown-warning-option"});
   }
 
   TEST_CASE("Directory extraction") {
