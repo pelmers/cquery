@@ -79,20 +79,19 @@ def configure(conf):
   conf.load('clang_compilation_database', tooldir='.')
 
   conf.env['use_system_clang'] = conf.options.use_system_clang
-  if conf.options.use_system_clang:
-    # Ask llvm-config for cflags and ldflags
+  if conf.options.llvm_config:
     conf.find_program(conf.options.llvm_config, msg='checking for llvm-config', var='LLVM_CONFIG', mandatory=False)
-    if conf.env.LLVM_CONFIG:
-      conf.check_cfg(msg='Checking for clang flags',
-                    path=conf.env.LLVM_CONFIG,
-                    package='',
-                    uselib_store='clang',
-                    args='--cppflags --ldflags')
-      # llvm-config does not provide the actual library we want so we check for it
-      # using the provided info so far.
-      conf.check_cxx(lib='clang', uselib_store='clang', use='clang')
+    # Ask llvm-config for cflags and ldflags
+    conf.check_cfg(msg='Checking for clang flags',
+                   path=conf.env.LLVM_CONFIG,
+                   package='',
+                   uselib_store='clang',
+                   args='--cppflags --ldflags')
+    # llvm-config does not provide the actual library we want so we check for it
+    # using the provided info so far.
+    conf.check_cxx(lib='clang', uselib_store='clang', use='clang')
 
-    else: # Fallback method using a prefix path
+  elif conf.options.use_system_clang: # Fallback method using a prefix path
       conf.start_msg('Checking for clang prefix')
       if not conf.options.clang_prefix:
         raise conf.errors.ConfigurationError('not found (--clang-prefix must be specified when llvm-config is not found)')
@@ -205,4 +204,3 @@ def build(bld):
   #  bld.logger = Logs.make_logger('test.log', 'build') # just to get a clean output
   #  bld.check(header_name='sadlib.h', features='cxx cxxprogram', mandatory=False)
   #  bld.logger = None
-
