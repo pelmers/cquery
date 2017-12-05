@@ -50,6 +50,8 @@ def options(opt):
                  help='specify path to llvm-config for automatic configuration [default: %default]')
   grp.add_option('--clang-prefix', dest='clang_prefix', default='',
                  help='enable fallback configuration method by specifying a clang installation prefix (e.g. /opt/llvm)')
+  grp.add_option('--cxxflags', dest='cxxflags', default=None,
+                 help='space separated list of cxxflags for compilation. This replaces the default cxxflags')
 
 def download_and_extract(destdir, url):
   dest = destdir + '.tar.xz'
@@ -79,6 +81,13 @@ def configure(conf):
   conf.load('clang_compilation_database', tooldir='.')
 
   conf.env['use_system_clang'] = conf.options.use_system_clang
+
+  if conf.options.cxxflags is None:
+    conf.env['cxxflags'] = ['-g', '-O3', '-std=c++11', '-Wall', '-Wno-sign-compare', '-Werror']
+  else:
+    conf.env['cxxflags'] = conf.options.cxxflags.split(' ')
+
+
   if conf.options.llvm_config:
     conf.find_program(conf.options.llvm_config, msg='checking for llvm-config', var='LLVM_CONFIG', mandatory=False)
     # Ask llvm-config for cflags and ldflags
@@ -177,7 +186,7 @@ def build(bld):
   bld.program(
       source=cc_files,
       use='clang',
-      cxxflags=['-g', '-O3', '-std=c++11', '-Wall', '-Wno-sign-compare', '-Werror'],
+      cxxflags=bld.env['cxxflags'],
       includes=[
         'third_party/',
         'third_party/doctest/',
