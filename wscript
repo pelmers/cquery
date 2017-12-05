@@ -197,7 +197,7 @@ def build(bld):
       defines=['LOGURU_WITH_STREAMS=1'],
       lib=lib,
       rpath=[] if bld.env['use_system_clang'] else bld.env['LIBPATH_clang'],
-      target='app')
+      target='cquery')
 
   #bld.shlib(source='a.cpp', target='mylib', vnum='9.8.7')
   #bld.shlib(source='a.cpp', target='mylib2', vnum='9.8.7', cnum='9.8')
