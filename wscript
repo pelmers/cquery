@@ -46,7 +46,7 @@ def options(opt):
                  help='enable use of clang from the system')
   grp.add_option('--bundled-clang', dest='bundled_clang', default='4.0.0', choices=('4.0.0', '5.0.0'),
                  help='bundled clang version')
-  grp.add_option('--llvm-config', dest='llvm_config', default='llvm-config',
+  grp.add_option('--llvm-config', dest='llvm_config', default=None,
                  help='specify path to llvm-config for automatic configuration [default: %default]')
   grp.add_option('--clang-prefix', dest='clang_prefix', default='',
                  help='enable fallback configuration method by specifying a clang installation prefix (e.g. /opt/llvm)')
