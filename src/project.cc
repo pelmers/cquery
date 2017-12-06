@@ -47,21 +47,10 @@ struct ProjectConfig {
 
 // TODO: See
 // https://github.com/Valloric/ycmd/blob/master/ycmd/completers/cpp/flags.py.
-static std::vector<std::string> kBlacklistMulti = {
-    "-MF", "-MT", "-MQ", "-o", "--serialize-diagnostics", "-Xclang"};
+static std::vector<std::string> kBlacklistMulti = {};
 
 // Blacklisted flags which are always removed from the command line.
-static std::vector<std::string> kBlacklist = {
-    "-c",
-    "-MP",
-    "-MD",
-    "-MMD",
-    "--fcolor-diagnostics",
-
-    // This strips path-like args but is a bit hacky.
-    "/",
-    "..",
-};
+static std::vector<std::string> kBlacklist = {};
 
 // Arguments which are followed by a potentially relative path. We need to make
 // all relative paths absolute, otherwise libclang will not resolve them.
@@ -286,7 +275,7 @@ std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
           ToString(clang_CompileCommand_getArg(cx_command, j)));
     }
     clang_time.Pause();  // TODO: don't call ToString in this block.
-    // LOG_S(INFO) << "Got args " << StringJoin(entry.args);
+    LOG_S(INFO) << "Got args " << StringJoin(entry.args);
 
     our_time.Resume();
     std::string absolute_filename;
