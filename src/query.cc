@@ -50,6 +50,7 @@ optional<QueryFunc::DefUpdate> ToQuery(const IdMap& id_map,
   result.base = id_map.ToQuery(func.base);
   result.locals = id_map.ToQuery(func.locals);
   result.callees = id_map.ToQuery(func.callees);
+  result.is_operator = func.is_operator;
   return result;
 }
 
@@ -173,6 +174,20 @@ QueryFile::Def BuildFileDef(const IdMap& id_map, const IndexFile& indexed) {
   def.path = indexed.path;
   def.includes = indexed.includes;
   def.inactive_regions = indexed.skipped_by_preprocessor;
+
+  // Convert enum to markdown compatible strings
+  def.language = [indexed]() {
+    switch (indexed.language) {
+      case LanguageId::C:
+        return "c";
+      case LanguageId::Cpp:
+        return "cpp";
+      case LanguageId::ObjC:
+        return "objectivec";
+      default:
+        return "";
+    }
+  }();
 
   auto add_outline = [&def, &id_map](SymbolIdx idx, Range range) {
     def.outline.push_back(SymbolRef(idx, id_map.ToQuery(range)));

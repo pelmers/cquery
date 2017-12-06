@@ -49,6 +49,8 @@ const char* IpcIdToString(IpcId id) {
     case IpcId::WorkspaceSymbol:
       return "workspace/symbol";
 
+    case IpcId::CqueryTextDocumentDidView:
+      return "$cquery/textDocumentDidView";
     case IpcId::CqueryPublishInactiveRegions:
       return "$cquery/publishInactiveRegions";
     case IpcId::CqueryPublishSemanticHighlighting:
@@ -71,8 +73,8 @@ const char* IpcIdToString(IpcId id) {
     case IpcId::CqueryDerived:
       return "$cquery/derived";
 
-    case IpcId::Cout:
-      return "$cout";
+    case IpcId::Unknown:
+      return "$unknown";
 
     case IpcId::CqueryIndexFile:
       return "$cquery/indexFile";

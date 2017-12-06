@@ -114,13 +114,13 @@ lsCompletionItemKind GetCompletionKind(CXCursorKind cursor_kind) {
     case CXCursor_TypeRef:
       return lsCompletionItemKind::Reference;
 
-    // return lsCompletionItemKind::Property;
-    // return lsCompletionItemKind::Unit;
-    // return lsCompletionItemKind::Value;
-    // return lsCompletionItemKind::Keyword;
-    // return lsCompletionItemKind::Snippet;
-    // return lsCompletionItemKind::Color;
-    // return lsCompletionItemKind::File;
+      // return lsCompletionItemKind::Property;
+      // return lsCompletionItemKind::Unit;
+      // return lsCompletionItemKind::Value;
+      // return lsCompletionItemKind::Keyword;
+      // return lsCompletionItemKind::Snippet;
+      // return lsCompletionItemKind::Color;
+      // return lsCompletionItemKind::File;
 
     case CXCursor_NotImplemented:
       return lsCompletionItemKind::Text;
@@ -135,6 +135,7 @@ void BuildDetailString(CXCompletionString completion_string,
                        std::string& label,
                        std::string& detail,
                        std::string& insert,
+                       lsInsertTextFormat& format,
                        std::vector<std::string>* parameters,
                        bool include_snippets) {
   int num_chunks = clang_getNumCompletionChunks(completion_string);
@@ -146,7 +147,7 @@ void BuildDetailString(CXCompletionString completion_string,
       case CXCompletionChunk_Optional: {
         CXCompletionString nested =
             clang_getCompletionChunkCompletionString(completion_string, i);
-        BuildDetailString(nested, label, detail, insert, parameters,
+        BuildDetailString(nested, label, detail, insert, format, parameters,
                           include_snippets);
         break;
       }
@@ -160,6 +161,7 @@ void BuildDetailString(CXCompletionString completion_string,
         if (include_snippets) {
           insert +=
               "${" + std::to_string(parameters->size()) + ":" + text + "}";
+          format = lsInsertTextFormat::Snippet;
         }
         break;
       }
@@ -204,6 +206,7 @@ void BuildDetailString(CXCompletionString completion_string,
         // Put cursor between parentheses if snippets are not enabled
         if (!include_snippets) {
           insert += "$1";
+          format = lsInsertTextFormat::Snippet;
         }
         break;
       case CXCompletionChunk_RightParen:
@@ -260,8 +263,6 @@ void BuildDetailString(CXCompletionString completion_string,
         break;
     }
   }
-
-  insert += "$0";
 }
 
 void TryEnsureDocumentParsed(ClangCompleteManager* manager,
@@ -420,8 +421,13 @@ void CompletionQueryMain(ClangCompleteManager* completion_manager) {
             BuildDetailString(
                 result.CompletionString, ls_completion_item.label,
                 ls_completion_item.detail, ls_completion_item.insertText,
+                ls_completion_item.insertTextFormat,
                 &ls_completion_item.parameters_,
                 completion_manager->config_->enableSnippetInsertion);
+            if (ls_completion_item.insertTextFormat ==
+                lsInsertTextFormat::Snippet) {
+              ls_completion_item.insertText += "$0";
+            }
 
             ls_completion_item.documentation = ToString(
                 clang_getCompletionBriefComment(result.CompletionString));
@@ -494,35 +500,6 @@ CompletionSession::CompletionSession(const Project::Entry& file,
       index(0 /*excludeDeclarationsFromPCH*/, 0 /*displayDiagnostics*/) {}
 
 CompletionSession::~CompletionSession() {}
-
-LruSessionCache::LruSessionCache(int max_entries) : max_entries_(max_entries) {}
-
-std::shared_ptr<CompletionSession> LruSessionCache::TryGetEntry(
-    const std::string& filename) {
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    if (entries_[i]->file.filename == filename)
-      return entries_[i];
-  }
-  return nullptr;
-}
-
-std::shared_ptr<CompletionSession> LruSessionCache::TryTakeEntry(
-    const std::string& filename) {
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    if (entries_[i]->file.filename == filename) {
-      std::shared_ptr<CompletionSession> result = entries_[i];
-      entries_.erase(entries_.begin() + i);
-      return result;
-    }
-  }
-  return nullptr;
-}
-
-void LruSessionCache::InsertEntry(std::shared_ptr<CompletionSession> session) {
-  if (entries_.size() && entries_.size() >= max_entries_)
-    entries_.pop_back();
-  entries_.insert(entries_.begin(), session);
-}
 
 ClangCompleteManager::ParseRequest::ParseRequest(const std::string& path)
     : request_time(std::chrono::high_resolution_clock::now()), path(path) {}
@@ -622,10 +599,10 @@ void ClangCompleteManager::NotifyClose(const std::string& filename) {
 
   // Take and drop. It's okay if we don't actually drop the file, it'll
   // eventually get pushed out of the caches as the user opens other files.
-  auto preloaded_ptr = preloaded_sessions_.TryTakeEntry(filename);
+  auto preloaded_ptr = preloaded_sessions_.TryTake(filename);
   LOG_IF_S(INFO, !!preloaded_ptr)
       << "Dropped preloaded-based code completion session for " << filename;
-  auto completion_ptr = completion_sessions_.TryTakeEntry(filename);
+  auto completion_ptr = completion_sessions_.TryTake(filename);
   LOG_IF_S(INFO, !!completion_ptr)
       << "Dropped completion-based code completion session for " << filename;
 
@@ -638,15 +615,15 @@ bool ClangCompleteManager::EnsureCompletionOrCreatePreloadSession(
   std::lock_guard<std::mutex> lock(sessions_lock_);
 
   // Check for an existing CompletionSession.
-  if (preloaded_sessions_.TryGetEntry(filename) ||
-      completion_sessions_.TryGetEntry(filename)) {
+  if (preloaded_sessions_.TryGet(filename) ||
+      completion_sessions_.TryGet(filename)) {
     return false;
   }
 
   // No CompletionSession, create new one.
   auto session = std::make_shared<CompletionSession>(
       project_->FindCompilationEntryForFile(filename), working_files_);
-  preloaded_sessions_.InsertEntry(session);
+  preloaded_sessions_.Insert(session->file.filename, session);
   return true;
 }
 
@@ -658,15 +635,15 @@ std::shared_ptr<CompletionSession> ClangCompleteManager::TryGetSession(
 
   // Try to find a preloaded session.
   std::shared_ptr<CompletionSession> preloaded_session =
-      preloaded_sessions_.TryGetEntry(filename);
+      preloaded_sessions_.TryGet(filename);
 
   if (preloaded_session) {
     // If this request is for a completion, we should move it to
     // |completion_sessions|.
     if (mark_as_completion) {
-      assert(!completion_sessions_.TryGetEntry(filename));
-      preloaded_sessions_.TryTakeEntry(filename);
-      completion_sessions_.InsertEntry(preloaded_session);
+      assert(!completion_sessions_.TryGet(filename));
+      preloaded_sessions_.TryTake(filename);
+      completion_sessions_.Insert(filename, preloaded_session);
     }
 
     return preloaded_session;
@@ -674,11 +651,11 @@ std::shared_ptr<CompletionSession> ClangCompleteManager::TryGetSession(
 
   // Try to find a completion session. If none create one.
   std::shared_ptr<CompletionSession> completion_session =
-      completion_sessions_.TryGetEntry(filename);
+      completion_sessions_.TryGet(filename);
   if (!completion_session && create_if_needed) {
     completion_session = std::make_shared<CompletionSession>(
         project_->FindCompilationEntryForFile(filename), working_files_);
-    completion_sessions_.InsertEntry(completion_session);
+    completion_sessions_.Insert(filename, completion_session);
   }
 
   return completion_session;

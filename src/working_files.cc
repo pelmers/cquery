@@ -4,6 +4,7 @@
 #include "position.h"
 
 #include <doctest/doctest.h>
+#include <loguru.hpp>
 
 #include <climits>
 
@@ -86,8 +87,8 @@ optional<int> WorkingFile::GetBufferLineFromIndexLine(int index_line) const {
   // TODO: reenable this assert once we are using the real indexed file.
   // assert(index_line >= 1 && index_line <= index_lines.size());
   if (index_line < 1 || index_line > index_lines.size()) {
-    std::cerr << "!! Bad index_line (got " << index_line << ", expected [1, "
-              << index_lines.size() << "])" << std::endl;
+    LOG_S(WARNING) << "Bad index_line (got " << index_line << ", expected [1, "
+                   << index_lines.size() << "])";
     return nullopt;
   }
 
@@ -123,8 +124,8 @@ optional<int> WorkingFile::GetIndexLineFromBufferLine(int buffer_line) const {
   // Note: |index_line| and |buffer_line| are 1-based.
   // assert(buffer_line >= 1 && buffer_line < all_buffer_lines.size());
   if (buffer_line < 1 || buffer_line > all_buffer_lines.size()) {
-    std::cerr << "!! Bad buffer_line (got " << buffer_line << ", expected [1, "
-              << all_buffer_lines.size() << "])" << std::endl;
+    LOG_S(WARNING) << "Bad buffer_line (got " << buffer_line
+                   << ", expected [1, " << all_buffer_lines.size() << "])";
     return nullopt;
   }
 
@@ -165,9 +166,8 @@ optional<std::string> WorkingFile::GetBufferLineContentFromIndexLine(
     return nullopt;
 
   if (*buffer_line < 1 || *buffer_line >= all_buffer_lines.size()) {
-    std::cerr << "GetBufferLineContentFromIndexLine buffer line lookup not in "
-                 "all_buffer_lines"
-              << std::endl;
+    LOG_S(WARNING) << "GetBufferLineContentFromIndexLine buffer line lookup not"
+                   << " in all_buffer_lines";
     return nullopt;
   }
 
@@ -291,15 +291,15 @@ void WorkingFiles::DoActionOnFile(
   action(file);
 }
 
-WorkingFile* WorkingFiles::OnOpen(const Ipc_TextDocumentDidOpen::Params& open) {
+WorkingFile* WorkingFiles::OnOpen(const lsTextDocumentItem& open) {
   std::lock_guard<std::mutex> lock(files_mutex);
 
-  std::string filename = open.textDocument.uri.GetPath();
-  std::string content = open.textDocument.text;
+  std::string filename = open.uri.GetPath();
+  std::string content = open.text;
 
   // The file may already be open.
   if (WorkingFile* file = GetFileByFilenameNoLock(filename)) {
-    file->version = open.textDocument.version;
+    file->version = open.version;
     file->buffer_content = content;
     file->OnBufferContentUpdated();
     return file;
@@ -309,60 +309,48 @@ WorkingFile* WorkingFiles::OnOpen(const Ipc_TextDocumentDidOpen::Params& open) {
   return files[files.size() - 1].get();
 }
 
-void WorkingFiles::OnChange(const Ipc_TextDocumentDidChange::Params& change) {
+void WorkingFiles::OnChange(const lsTextDocumentDidChangeParams& change) {
   std::lock_guard<std::mutex> lock(files_mutex);
 
   std::string filename = change.textDocument.uri.GetPath();
   WorkingFile* file = GetFileByFilenameNoLock(filename);
   if (!file) {
-    std::cerr << "Could not change " << filename << " because it was not open"
-              << std::endl;
+    LOG_S(WARNING) << "Could not change " << filename
+                   << " because it was not open";
     return;
   }
 
   file->version = change.textDocument.version;
-  // std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
-  // std::cerr << "VERSION " << change.textDocument.version << std::endl;
 
-  for (const Ipc_TextDocumentDidChange::lsTextDocumentContentChangeEvent& diff :
-       change.contentChanges) {
-    // std::cerr << "|" << file->buffer_content << "|" << std::endl;
+  for (const lsTextDocumentContentChangeEvent& diff : change.contentChanges) {
     // Per the spec replace everything if the rangeLength and range are not set.
     // See https://github.com/Microsoft/language-server-protocol/issues/9.
-    if (diff.rangeLength == -1 && diff.range.start == lsPosition::kZeroPosition
-        && diff.range.end == lsPosition::kZeroPosition) {
+    if (diff.rangeLength == -1 &&
+        diff.range.start == lsPosition::kZeroPosition &&
+        diff.range.end == lsPosition::kZeroPosition) {
       file->buffer_content = diff.text;
       file->OnBufferContentUpdated();
-      // std::cerr << "-> Replacing entire content";
     } else {
-      int start_offset = GetOffsetForPosition(diff.range.start, file->buffer_content);
-      int end_offset = GetOffsetForPosition(diff.range.end, file->buffer_content);
+      int start_offset =
+          GetOffsetForPosition(diff.range.start, file->buffer_content);
+      int end_offset =
+          GetOffsetForPosition(diff.range.end, file->buffer_content);
       int length = diff.rangeLength;
       if (length == -1) {
         length = end_offset - start_offset;
       }
-      // std::cerr << "-> Applying diff start=" << diff.range.start.ToString()
-      // << ", end=" << diff.range.end.ToString() << ", start_offset=" <<
-      // start_offset << std::endl;
       file->buffer_content.replace(
           file->buffer_content.begin() + start_offset,
-          file->buffer_content.begin() + start_offset + length,
-          diff.text);
+          file->buffer_content.begin() + start_offset + length, diff.text);
       file->OnBufferContentUpdated();
     }
-
-    // std::cerr << "|" << file->buffer_content << "|" << std::endl;
   }
-  // std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
-
-  // std::cerr << std::endl << std::endl << "--------" << file->content <<
-  // "--------" << std::endl << std::endl;
 }
 
-void WorkingFiles::OnClose(const Ipc_TextDocumentDidClose::Params& close) {
+void WorkingFiles::OnClose(const lsTextDocumentItem& close) {
   std::lock_guard<std::mutex> lock(files_mutex);
 
-  std::string filename = close.textDocument.uri.GetPath();
+  std::string filename = close.uri.GetPath();
 
   for (int i = 0; i < files.size(); ++i) {
     if (files[i]->filename == filename) {
@@ -371,8 +359,8 @@ void WorkingFiles::OnClose(const Ipc_TextDocumentDidClose::Params& close) {
     }
   }
 
-  std::cerr << "Could not close " << filename << " because it was not open"
-            << std::endl;
+  LOG_S(WARNING) << "Could not close " << filename
+                 << " because it was not open";
 }
 
 std::vector<CXUnsavedFile> WorkingFiles::AsUnsavedFiles() {

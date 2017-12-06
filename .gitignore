@@ -1,10 +1,10 @@
+*.cquery
 *.pyc 
 *.sln
 *.swp
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
-*CACHE*
 .DS_Store
 .lock-waf*
 .vs

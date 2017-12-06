@@ -195,6 +195,15 @@ void EnsureEndsInSlash(std::string& path) {
     path += '/';
 }
 
+std::string EscapeFileName(std::string path) {
+  if (path.size() && path.back() == '/')
+    path.pop_back();
+  std::replace(path.begin(), path.end(), '\\', '_');
+  std::replace(path.begin(), path.end(), '/', '_');
+  std::replace(path.begin(), path.end(), ':', '_');
+  return path;
+}
+
 // http://stackoverflow.com/a/6089413
 std::istream& SafeGetline(std::istream& is, std::string& t) {
   t.clear();
@@ -236,19 +245,12 @@ optional<std::string> ReadContent(const std::string& filename) {
   }
 }
 
-std::vector<std::string> ReadLines(std::string filename) {
+std::vector<std::string> ReadLinesWithEnding(std::string filename) {
   std::vector<std::string> result;
 
   std::ifstream input(filename);
-  for (std::string line; SafeGetline(input, line);) {
-#if false
-    LOG_S(INFO) << "!! got line |" << line << "|";
-    for (char c : line)
-      std::cout << (int)c << ",";
-    std::cout << std::endl;
-#endif
+  for (std::string line; SafeGetline(input, line);)
     result.push_back(line);
-  }
 
   return result;
 }
@@ -294,7 +296,7 @@ std::unordered_map<std::string, std::string> ParseTestExpectation(
   std::string active_output_filename;
   std::string active_output_contents;
 
-  for (std::string line_with_ending : ReadLines(filename)) {
+  for (std::string line_with_ending : ReadLinesWithEnding(filename)) {
     if (StartsWith(line_with_ending, "*/"))
       break;
 
