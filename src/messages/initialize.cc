@@ -209,8 +209,9 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
       // files, because that takes a long time.
       include_complete->Rescan();
 
-      auto* queue = QueueManager::instance();
+      /*
       time.Reset();
+      auto* queue = QueueManager::instance();
       project->ForAllFilteredFiles(
           config, [&](int i, const Project::Entry& entry) {
             optional<std::string> content = ReadContent(entry.filename);
@@ -227,6 +228,7 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
 
       // We need to support multiple concurrent index processes.
       time.ResetAndPrint("[perf] Dispatched initial index requests");
+      */
     }
   }
 };
