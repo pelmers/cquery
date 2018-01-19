@@ -37,6 +37,8 @@ struct Config {
   int indexerCount = 0;
   // If false, the indexer will be disabled.
   bool enableIndexing = true;
+  // If true, only index interactive files (open in the editor).
+  bool lazyIndexing = false;
   // If false, indexed files will not be written to disk.
   bool enableCacheWrite = true;
   // If false, the index will not be loaded from a previous run.
@@ -117,6 +119,7 @@ MAKE_REFLECT_STRUCT(Config,
 
                     indexerCount,
                     enableIndexing,
+                    lazyIndexing,
                     enableCacheWrite,
                     enableCacheRead,
                     progressReportFrequencyMs,

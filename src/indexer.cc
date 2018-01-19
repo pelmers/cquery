@@ -1931,8 +1931,8 @@ std::vector<std::unique_ptr<IndexFile>> Parse(
   if (dump_ast)
     Dump(clang_getTranslationUnitCursor(tu->cx_tu));
 
-  return ParseWithTu(file_consumer_shared, perf, tu.get(), index, file, args,
-                     unsaved_files);
+  return ParseWithTu(file_consumer_shared, perf, tu.get(), index, file,
+                     args, unsaved_files);
 }
 
 std::vector<std::unique_ptr<IndexFile>> ParseWithTu(

@@ -209,26 +209,26 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
       // files, because that takes a long time.
       include_complete->Rescan();
 
-      /*
       time.Reset();
-      auto* queue = QueueManager::instance();
-      project->ForAllFilteredFiles(
-          config, [&](int i, const Project::Entry& entry) {
-            optional<std::string> content = ReadContent(entry.filename);
-            if (!content) {
-              LOG_S(ERROR) << "When loading project, canont read file "
-                           << entry.filename;
-              return;
-            }
-            bool is_interactive =
-                working_files->GetFileByFilename(entry.filename) != nullptr;
-            queue->index_request.Enqueue(Index_Request(
-                entry.filename, entry.args, is_interactive, *content));
-          });
+      if (!config->lazyIndexing) {
+        auto* queue = QueueManager::instance();
+        project->ForAllFilteredFiles(
+            config, [&](int i, const Project::Entry& entry) {
+              optional<std::string> content = ReadContent(entry.filename);
+              if (!content) {
+                LOG_S(ERROR) << "When loading project, cannot read file "
+                             << entry.filename;
+                return;
+              }
+              bool is_interactive =
+                  working_files->GetFileByFilename(entry.filename) != nullptr;
+              queue->index_request.Enqueue(Index_Request(
+                  entry.filename, entry.args, is_interactive, *content));
+            });
+      }
 
       // We need to support multiple concurrent index processes.
       time.ResetAndPrint("[perf] Dispatched initial index requests");
-      */
     }
   }
 };

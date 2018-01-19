@@ -176,6 +176,7 @@ ShouldParse FileNeedsParse(
 
 enum CacheLoadResult { Parse, DoNotParse };
 CacheLoadResult TryLoadFromCache(
+  Config* config,
     FileConsumerSharedState* file_consumer_shared,
     TimestampManager* timestamp_manager,
     IModificationTimestampFetcher* modification_timestamp_fetcher,
@@ -244,6 +245,7 @@ CacheLoadResult TryLoadFromCache(
     //
     // This is important for perf in large projects where there are lots of
     // dependencies shared between many files.
+    // if (!file_consumer_shared->Mark(dependency) || config->lazyIndexing)
     if (!file_consumer_shared->Mark(dependency))
       continue;
 
@@ -335,7 +337,7 @@ void ParseFile(Config* config,
   }
 
   // Try to load the file from cache.
-  if (TryLoadFromCache(file_consumer_shared, timestamp_manager,
+  if (TryLoadFromCache(config, file_consumer_shared, timestamp_manager,
                        modification_timestamp_fetcher, import_manager,
                        cache_manager, is_interactive, entry,
                        path_to_index) == CacheLoadResult::DoNotParse) {
@@ -362,7 +364,7 @@ void ParseFile(Config* config,
 
     // When main thread does IdMap request it will request the previous index if
     // needed.
-    LOG_S(INFO) << "Emitting index result for " << new_index->path;
+    LOG_S(INFO) << "Emitting index result for parsing " << new_index->path;
     result.push_back(Index_DoIdMap(std::move(new_index), perf, is_interactive,
                                    true /*write_to_disk*/));
   }
@@ -383,6 +385,8 @@ bool IndexMain_DoParse(
   optional<Index_Request> request = queue->index_request.TryDequeue();
   if (!request)
     return false;
+  LOG_S(INFO) << "Starting work for " << request->path;
+  assert(!config->lazyIndexing || request->is_interactive);
 
   Project::Entry entry;
   entry.filename = request->path;
@@ -527,7 +531,7 @@ void IndexWithTuFromCodeCompletion(
 
     // When main thread does IdMap request it will request the previous index if
     // needed.
-    LOG_S(INFO) << "Emitting index result for " << new_index->path;
+    LOG_S(INFO) << "Emitting index result for code complete " << new_index->path;
     result.push_back(Index_DoIdMap(std::move(new_index), perf,
                                    true /*is_interactive*/,
                                    true /*write_to_disk*/));
