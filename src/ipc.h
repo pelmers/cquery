@@ -46,6 +46,7 @@ enum class IpcId : int {
 
   // Custom messages
   CqueryFreshenIndex,
+  CqueryStats,
   // Messages used in tree views.
   CqueryTypeHierarchyTree,
   CqueryCallTreeInitial,
