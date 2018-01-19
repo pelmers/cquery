@@ -68,6 +68,8 @@ const char* IpcIdToString(IpcId id) {
 
     case IpcId::CqueryFreshenIndex:
       return "$cquery/freshenIndex";
+    case IpcId::CqueryStats:
+      return "$cquery/stats";
     case IpcId::CqueryTypeHierarchyTree:
       return "$cquery/typeHierarchyTree";
     case IpcId::CqueryCallTreeInitial:

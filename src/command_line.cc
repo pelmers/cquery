@@ -287,6 +287,7 @@ void LaunchStdinLoop(Config* config,
         case IpcId::WorkspaceDidChangeWatchedFiles:
         case IpcId::WorkspaceSymbol:
         case IpcId::CqueryFreshenIndex:
+        case IpcId::CqueryStats:
         case IpcId::CqueryTypeHierarchyTree:
         case IpcId::CqueryCallTreeInitial:
         case IpcId::CqueryCallTreeExpand:
