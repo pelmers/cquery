@@ -12,6 +12,7 @@
 #include "queue_manager.h"
 #include "timer.h"
 #include "timestamp_manager.h"
+#include "match.h"
 
 #include <doctest/doctest.h>
 #include <loguru.hpp>
@@ -725,7 +726,16 @@ bool QueryDb_ImportMain(Config* config,
     if (!request)
       break;
     did_work = true;
-    QueryDb_DoIdMap(queue, db, import_manager, &*request);
+    GroupMatch matcher(config->queryWhitelist, config->queryBlacklist);
+    std::string current_path = request->current->path;
+    std::string failure_reason;
+    if (matcher.IsMatch(current_path, &failure_reason)) {
+      QueryDb_DoIdMap(queue, db, import_manager, &*request);
+    } else {
+      if (config->logSkippedPathsForIndex) {
+        LOG_S(INFO) << "[" << current_path  << "]: Failed " << failure_reason;
+      }
+    }
   }
 
   while (true) {

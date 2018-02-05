@@ -59,6 +59,8 @@ struct Config {
   // Example: `ash/.*\.cc`
   std::vector<std::string> indexWhitelist;
   std::vector<std::string> indexBlacklist;
+  std::vector<std::string> queryWhitelist;
+  std::vector<std::string> queryBlacklist;
   // If true, project paths that were skipped by the whitelist/blacklist will
   // be logged.
   bool logSkippedPathsForIndex = false;
@@ -193,6 +195,8 @@ MAKE_REFLECT_STRUCT(Config,
 
                     indexWhitelist,
                     indexBlacklist,
+                    queryWhitelist,
+                    queryBlacklist,
                     logSkippedPathsForIndex,
 
                     maxWorkspaceSearchResults,
