@@ -49,6 +49,7 @@ std::vector<QueryLocation> GetGotoDefinitionTargets(QueryDatabase* db,
 struct TextDocumentDefinitionHandler
     : BaseMessageHandler<Ipc_TextDocumentDefinition> {
   void Run(Ipc_TextDocumentDefinition* request) override {
+    // TODO pelmers maybe have to fall back on cursor declaration if query file doesn't exist?
     QueryFileId file_id;
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
@@ -116,6 +117,7 @@ struct TextDocumentDefinitionHandler
         break;
     }
 
+    // TODO pelmers: follow symlinks.
     // No symbols - check for includes.
     if (out.result.empty()) {
       for (const IndexInclude& include : file->def->includes) {
