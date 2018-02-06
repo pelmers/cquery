@@ -1,4 +1,5 @@
 #include "language_server_api.h"
+#include "platform.h"
 
 #include "serializers/json.h"
 
@@ -7,6 +8,7 @@
 
 #include <stdio.h>
 #include <iostream>
+#include <unistd.h>
 
 MessageRegistry* MessageRegistry::instance_ = nullptr;
 
@@ -198,6 +200,19 @@ void lsResponseError::Write(Writer& visitor) {
 
 lsDocumentUri lsDocumentUri::FromPath(const std::string& path) {
   lsDocumentUri result;
+#if defined(__unix__) || defined(__APPLE__)
+  // Use readlink to resolve symlink.
+  if (IsSymLink(path)) {
+    char buf[1024];
+    ssize_t len;
+    if ((len = readlink(path.c_str(), buf, sizeof(buf)-1)) != -1) {
+      // readlink does not append null byte to buf.
+      buf[len] = '\0';
+      result.SetPath(buf);
+      return result;
+    }
+  }
+#endif
   result.SetPath(path);
   return result;
 }
