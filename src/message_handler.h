@@ -104,7 +104,7 @@ struct BaseMessageHandler : MessageHandler {
 };
 
 bool FindFileOrFail(QueryDatabase* db,
-                    const Project* project,
+                    Project* project,
                     optional<lsRequestId> id,
                     const AbsolutePath& absolute_path,
                     QueryFile** out_query_file,

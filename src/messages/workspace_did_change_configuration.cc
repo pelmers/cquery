@@ -28,7 +28,7 @@ struct Handler_WorkspaceDidChangeConfiguration
   MethodType GetMethodType() const override { return kMethodType; }
   void Run(In_WorkspaceDidChangeConfiguration* request) override {
     Timer time;
-    project->Load(g_config->projectRoot);
+    // project->Load(g_config->projectRoot);
     time.ResetAndPrint("[perf] Loaded compilation entries (" +
                        std::to_string(project->entries.size()) + " files)");
 

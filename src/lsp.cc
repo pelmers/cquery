@@ -1,4 +1,5 @@
 #include "lsp.h"
+#include "platform.h"
 
 #include "lru_cache.h"
 #include "platform.h"
@@ -11,6 +12,7 @@
 
 #include <stdio.h>
 #include <iostream>
+#include <unistd.h>
 
 namespace {
 

@@ -39,6 +39,7 @@ struct Handler_WorkspaceDidChangeWatchedFiles
     : BaseMessageHandler<In_WorkspaceDidChangeWatchedFiles> {
   MethodType GetMethodType() const override { return kMethodType; }
   void Run(In_WorkspaceDidChangeWatchedFiles* request) override {
+    std::lock_guard<std::mutex> lock(project->project_lock_);
     for (lsFileEvent& event : request->params.changes) {
       AbsolutePath path = event.uri.GetAbsolutePath();
       auto it = project->absolute_path_to_entry_index_.find(path);

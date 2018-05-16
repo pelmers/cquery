@@ -54,11 +54,12 @@ MessageHandler::MessageHandler() {
 std::vector<MessageHandler*>* MessageHandler::message_handlers = nullptr;
 
 bool FindFileOrFail(QueryDatabase* db,
-                    const Project* project,
+                    Project* project,
                     optional<lsRequestId> id,
                     const AbsolutePath& absolute_path,
                     QueryFile** out_query_file,
                     QueryFileId* out_file_id) {
+  std::lock_guard<std::mutex> lock(project->project_lock_);
   *out_query_file = nullptr;
 
   auto it = db->usr_to_file.find(absolute_path);

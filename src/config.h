@@ -92,6 +92,9 @@ struct Config {
   // If true, document links are reported for #include directives.
   bool showDocumentLinksOnIncludes = true;
 
+  // If true, disable initial index (and only index on $addCompilationDb)
+  bool disableInitialIndex = false;
+
   struct CodeLens {
     // Enables code lens on parameter and function variables.
     bool localVariables = true;
@@ -281,6 +284,7 @@ MAKE_REFLECT_STRUCT(Config,
                     emitQueryDbBlocked,
 
                     showDocumentLinksOnIncludes,
+                    disableInitialIndex,
 
                     codeLens,
                     completion,

@@ -184,6 +184,7 @@ void FilterAndSortCompletionResponse(
   }
 #endif
 
+  const size_t kMaxResultSize = 60u;
   auto& items = complete_response->result.items;
 
   auto finalize = [&]() {
@@ -404,10 +405,10 @@ struct Handler_TextDocumentCompletion : MessageHandler {
                                             g_config->completion.filterAndSort);
             // Add text edits with the same text, but whose ranges include the
             // whole token from start to end.
-            for (auto& item : out.result.items) {
-              item.textEdit = lsTextEdit{
-                  lsRange(request->params.position, end_pos), item.insertText};
-            }
+            // for (auto& item : out.result.items) {
+            //   item.textEdit = lsTextEdit{
+            //       lsRange(request->params.position, end_pos), item.insertText};
+            // }
 
             QueueManager::WriteStdout(kMethodType, out);
 

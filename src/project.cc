@@ -690,16 +690,15 @@ int ComputeGuessScore(const std::string& a, const std::string& b) {
 
 }  // namespace
 
-void Project::Load(const AbsolutePath& root_directory) {
+void Project::Load(const AbsolutePath& root_directory, const std::string& compilationDatabaseDirectory) {
+  std::lock_guard<std::mutex> lock(project_lock_);
   // Load data.
   ProjectConfig project;
   project.extra_flags = g_config->extraClangArguments;
   project.project_dir = root_directory;
   project.resource_dir = g_config->resourceDirectory;
-  entries = LoadCompilationEntriesFromDirectory(
-      &project, g_config->compilationDatabaseDirectory.empty()
-                    ? "build"
-                    : g_config->compilationDatabaseDirectory);
+  auto loadedEntries = LoadCompilationEntriesFromDirectory(&project, compilationDatabaseDirectory);
+  entries.insert(entries.end(), loadedEntries.begin(), loadedEntries.end());
 
   // Cleanup / postprocess include directories.
   quote_include_directories.assign(project.quote_dirs.begin(),
@@ -714,13 +713,14 @@ void Project::Load(const AbsolutePath& root_directory) {
   }
 
   // Setup project entries.
-  absolute_path_to_entry_index_.resize(entries.size());
+  // absolute_path_to_entry_index_.resize(entries.size());
   for (int i = 0; i < entries.size(); ++i)
     absolute_path_to_entry_index_[entries[i].filename] = i;
 }
 
 void Project::SetFlagsForFile(const std::vector<std::string>& flags,
                               const AbsolutePath& path) {
+  std::lock_guard<std::mutex> lock(project_lock_);
   auto it = absolute_path_to_entry_index_.find(path);
   if (it != absolute_path_to_entry_index_.end()) {
     // The entry already exists in the project, just set the flags.
@@ -737,6 +737,7 @@ void Project::SetFlagsForFile(const std::vector<std::string>& flags,
 
 Project::Entry Project::FindCompilationEntryForFile(
     const AbsolutePath& filename) {
+  std::lock_guard<std::mutex> lock(project_lock_);
   auto it = absolute_path_to_entry_index_.find(filename);
   if (it != absolute_path_to_entry_index_.end())
     return entries[it->second];
@@ -779,6 +780,7 @@ Project::Entry Project::FindCompilationEntryForFile(
 void Project::ForAllFilteredFiles(
     std::function<void(int i, const Entry& entry)> action) {
   GroupMatch matcher(g_config->index.whitelist, g_config->index.blacklist);
+  std::lock_guard<std::mutex> lock(project_lock_);
   for (int i = 0; i < entries.size(); ++i) {
     const Project::Entry& entry = entries[i];
     std::string failure_reason;

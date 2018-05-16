@@ -115,7 +115,7 @@ struct Handler_TextDocumentDefinition
         }
       }
       // Find the best match of the identifier at point.
-      if (!has_symbol) {
+      if (!has_symbol && working_file) {
         lsPosition position = request->params.position;
         const std::string& buffer = working_file->buffer_content;
         std::string_view query = LexIdentifierAroundPos(position, buffer);

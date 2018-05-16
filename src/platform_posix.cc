@@ -104,6 +104,16 @@ optional<AbsolutePath> RealPathNotExpandSymlink(std::string path,
     }
   }
 
+  // Use readlink to resolve 1 level of symlink.
+  if (IsSymLink(resolved)) {
+    char rlBuf[1024];
+    ssize_t len;
+    if ((len = readlink(path.c_str(), rlBuf, sizeof(rlBuf)-1)) != -1) {
+      // readlink does not append null byte to rlBuf.
+      rlBuf[len] = '\0';
+      resolved = std::string(rlBuf);
+    }
+  }
   // Remove trailing slash except when a single "/".
   if (resolved.size() > 1 && resolved.back() == '/')
     resolved.pop_back();

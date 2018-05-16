@@ -594,7 +594,9 @@ struct Handler_Initialize : BaseMessageHandler<In_InitializeRequest> {
       semantic_cache->Init();
 
       // Open up / load the project.
-      project->Load(project_path);
+      if (!g_config->disableInitialIndex) {
+        project->Load(project_path, g_config->compilationDatabaseDirectory);
+      }
       time.ResetAndPrint("[perf] Loaded compilation entries (" +
                          std::to_string(project->entries.size()) + " files)");
 
@@ -624,7 +626,9 @@ struct Handler_Initialize : BaseMessageHandler<In_InitializeRequest> {
       include_complete->Rescan();
 
       time.Reset();
-      project->Index(QueueManager::instance(), working_files, request->id);
+      if (!g_config->disableInitialIndex) {
+        project->Index(QueueManager::instance(), working_files, request->id);
+      }
       // We need to support multiple concurrent index processes.
       time.ResetAndPrint("[perf] Dispatched initial index requests");
     }

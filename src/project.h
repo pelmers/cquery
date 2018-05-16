@@ -29,6 +29,8 @@ struct Project {
 
   std::vector<Entry> entries;
   spp::sparse_hash_map<AbsolutePath, int> absolute_path_to_entry_index_;
+  // Mutex which protects project during Load.
+  std::mutex project_lock_;
 
   // Loads a project for the given |directory|.
   //
@@ -41,7 +43,7 @@ struct Project {
   // will affect flags in their subtrees (relative paths are relative to the
   // project root, not subdirectories). For compile_commands.json, its entries
   // are indexed.
-  void Load(const AbsolutePath& root_directory);
+  void Load(const AbsolutePath& root_directory, const std::string&);
 
   // Lookup the CompilationEntry for |filename|. If no entry was found this
   // will infer one based on existing project structure.
